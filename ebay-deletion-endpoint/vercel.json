@@ -1,9 +1,0 @@
-{
-  "version": 2,
-  "builds": [
-    { "src": "api/account-deletion.js", "use": "@vercel/node" }
-  ],
-  "routes": [
-    { "src": "/account-deletion", "dest": "api/account-deletion.js" }
-  ]
-}
