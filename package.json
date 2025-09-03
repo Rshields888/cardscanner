@@ -1,0 +1,17 @@
+{
+  "name": "card-scan-api-vision",
+  "version": "1.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@google-cloud/vision": "^4.3.2",
+    "next": "15.0.3",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
+  }
+}
