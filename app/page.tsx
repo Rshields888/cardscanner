@@ -1,1 +1,0 @@
-export default function Home(){return (<main style={{padding:20,fontFamily:'system-ui'}}>Card Scan API (Google Vision + eBay Finding). Use <code>/api/scan</code> and <code>/api/ebay/comps</code>.</main>)}
