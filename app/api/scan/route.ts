@@ -1,6 +1,7 @@
 
 import vision from "@google-cloud/vision";
-import { findCompletedComps } from "@/lib/ebay";
+import { findCompletedComps } from "../../lib/ebay";
+
 
 export const runtime = 'nodejs';
 export const maxDuration = 15;
