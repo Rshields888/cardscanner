@@ -1,4 +1,4 @@
-import { findCompletedComps } from "../../../lib/ebay";
+import { findCompletedComps } from "../../../../lib/ebay";
 export const runtime = 'nodejs';
 
 function ensureEnv(name: string) {
