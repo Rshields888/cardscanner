@@ -1,0 +1,1 @@
+export default function Home(){return (<main>Card Scanner API — use <code>/api/scan</code> and <code>/api/ebay/comps</code>.</main>)}
