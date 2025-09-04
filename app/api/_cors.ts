@@ -1,0 +1,3 @@
+export function corsHeaders(origin="*"){return {"Access-Control-Allow-Origin":origin,"Access-Control-Allow-Methods":"GET,POST,OPTIONS","Access-Control-Allow-Headers":"Content-Type, Authorization","Access-Control-Max-Age":"86400"};}
+export function okJSON(data:any,origin="*"){return new Response(JSON.stringify(data),{headers:{"content-type":"application/json",...corsHeaders(origin)}});}
+export function okEmpty(origin="*"){return new Response(null,{headers:corsHeaders(origin)});}
