@@ -1,5 +1,6 @@
 import vision from "@google-cloud/vision";
 import { findCompletedComps } from "@/lib/ebay";
+import { cache } from "@/lib/cache";
 import { okJSON, okEmpty, corsHeaders } from "../_cors";
 export const runtime = "nodejs";
 export const maxDuration = 15;
@@ -35,10 +36,45 @@ export async function POST(req: Request){
     const query = buildQueryFromText(text);
     const manual = String(form.get('manual')||'0') === '1';
     let comps = null;
+    let compsError = null;
+    
     if (manual) {
-      comps = await findCompletedComps(query, ensureEnv("EBAY_APP_ID"));
+      // Check if we've already processed this exact OCR text recently
+      const isNewOcrText = !cache.hasOcrText(text);
+      
+      if (isNewOcrText) {
+        try {
+          // Only call eBay API for truly new OCR text
+          comps = await findCompletedComps(query, ensureEnv("EBAY_APP_ID"), true);
+          // Mark this OCR text as processed
+          cache.setOcrText(text);
+        } catch (error: any) {
+          console.error('eBay API error in scan:', error);
+          compsError = {
+            message: error?.message || "Failed to fetch eBay data",
+            isRateLimited: error.name === 'EbayApiError' && error.status === 429,
+            retryAfter: error.retryAfter
+          };
+        }
+      } else {
+        // Return cached data for previously processed OCR text
+        const cacheKey = `ebay_comps_${query.toLowerCase().replace(/\s+/g, '_')}`;
+        comps = cache.get(cacheKey);
+        if (!comps) {
+          compsError = {
+            message: "No cached data available for this previously processed text",
+            isRateLimited: false
+          };
+        }
+      }
     }
-    return okJSON({ title: query, comps, ocrText: text?.slice(0,1000) || null });
+    
+    return okJSON({ 
+      title: query, 
+      comps, 
+      compsError,
+      ocrText: text?.slice(0,1000) || null 
+    });
   }catch(e:any){
     return new Response(JSON.stringify({ error: e?.message || "scan failed" }), { status: 500, headers: { "content-type":"application/json", ...corsHeaders() } });
   }
