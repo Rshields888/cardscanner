@@ -21,6 +21,10 @@ function buildQueryFromText(text: string){
 export async function OPTIONS(){ return okEmpty(); }
 export async function POST(req: Request){
   try{
+    // Validate Chrome extension origin for eBay API calls
+    const origin = req.headers.get('origin');
+    const isChromeExtension = origin?.startsWith('chrome-extension://') || origin?.startsWith('moz-extension://');
+    
     const form = await req.formData();
     const image = form.get("image");
     if(!image || !(image instanceof Blob)){
@@ -38,13 +42,14 @@ export async function POST(req: Request){
     let comps = null;
     let compsError = null;
     
-    if (manual) {
+    if (manual && isChromeExtension) {
+      // Only call eBay API for Chrome extension requests with manual flag
       // Check if we've already processed this exact OCR text recently
       const isNewOcrText = !cache.hasOcrText(text);
       
       if (isNewOcrText) {
         try {
-          // Only call eBay API for truly new OCR text
+          // Only call eBay API for truly new OCR text from Chrome extensions
           comps = await findCompletedComps(query, ensureEnv("EBAY_APP_ID"), true);
           // Mark this OCR text as processed
           cache.setOcrText(text);
@@ -67,6 +72,12 @@ export async function POST(req: Request){
           };
         }
       }
+    } else if (manual && !isChromeExtension) {
+      // Reject manual requests from non-extension origins
+      return new Response(
+        JSON.stringify({ error: "eBay API access restricted to Chrome extensions" }), 
+        { status: 403, headers: { "content-type":"application/json", ...corsHeaders() } }
+      );
     }
     
     return okJSON({ 

@@ -1,0 +1,320 @@
+import { okJSON, okEmpty, corsHeaders } from "../_cors";
+
+export const runtime = "nodejs";
+export const maxDuration = 15;
+
+// Type definitions
+type Identity = {
+  player: string;
+  year: string;
+  set: string;
+  card_number: string;
+  variant: string;
+  grade: "Raw" | "PSA 10" | "PSA 9" | "SGC 10" | "SGC 9.5" | "SGC 9" | "BGS 10" | "BGS 9.5" | "BGS 9";
+  confidence: number;
+  query: string;
+  alt_queries: string[];
+};
+
+type HistoryEntry = {
+  date: string;
+  price: number;
+};
+
+type AnalyzeResponse = {
+  identity: Identity;
+  history: HistoryEntry[];
+};
+
+type AnalyzeError = {
+  error: string;
+};
+
+// Utility functions
+function ensureEnv(name: string): string {
+  const v = process.env[name];
+  if (!v) throw new Error(`${name} not set`);
+  return v;
+}
+
+function validateImageSize(base64: string): void {
+  // Rough estimate: base64 is ~4/3 the size of binary data
+  // 6MB binary ≈ 8MB base64
+  const maxBase64Size = 8 * 1024 * 1024; // 8MB
+  if (base64.length > maxBase64Size) {
+    throw new Error("Image too large (max 6MB)");
+  }
+}
+
+async function processImageDataUrl(imageDataUrl: string): Promise<string> {
+  if (!imageDataUrl.startsWith('data:')) {
+    throw new Error("Invalid imageDataUrl format");
+  }
+  
+  const base64Match = imageDataUrl.match(/^data:[^;]+;base64,(.+)$/);
+  if (!base64Match) {
+    throw new Error("Invalid base64 data format");
+  }
+  
+  const base64 = base64Match[1];
+  validateImageSize(base64);
+  return base64;
+}
+
+async function processImageUrl(imageUrl: string): Promise<string> {
+  try {
+    const response = await fetch(imageUrl);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch image: ${response.status}`);
+    }
+    
+    const arrayBuffer = await response.arrayBuffer();
+    const base64 = Buffer.from(arrayBuffer).toString('base64');
+    validateImageSize(base64);
+    return base64;
+  } catch (error) {
+    throw new Error(`Failed to process image URL: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+async function callGoogleVisionAPI(imageBase64: string): Promise<any> {
+  const apiKey = ensureEnv("GOOGLE_VISION_API_KEY");
+  const url = `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`;
+  
+  const requestBody = {
+    requests: [{
+      image: {
+        content: imageBase64
+      },
+      features: [
+        { type: "WEB_DETECTION", maxResults: 10 },
+        { type: "TEXT_DETECTION", maxResults: 10 }
+      ]
+    }]
+  };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(requestBody)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Google Vision API error: ${response.status} - ${errorText}`);
+  }
+
+  return await response.json();
+}
+
+function parseCardIdentity(webDetection: any, textDetection: any): Identity {
+  const text = textDetection?.fullTextAnnotation?.text || "";
+  const webEntities = webDetection?.webEntities || [];
+  
+  // Extract year
+  const yearMatch = text.match(/\b(19|20)\d{2}\b/);
+  const year = yearMatch ? yearMatch[0] : "";
+  
+  // Detect set names
+  const setPatterns = [
+    "Topps", "Bowman", "Panini", "Prizm", "Select", "Mosaic", "Donruss", 
+    "Chrome", "Allen & Ginter", "Optic", "Fleer", "Upper Deck", "Score"
+  ];
+  const set = setPatterns.find(setName => 
+    text.toLowerCase().includes(setName.toLowerCase())
+  ) || "";
+  
+  // Extract card number with normalization
+  const numberPatterns = [
+    /#\s*([A-Z]*\s*\d+[A-Z]?)/i,
+    /no\.\s*([A-Z]*\s*\d+[A-Z]?)/i,
+    /card\s*#?\s*([A-Z]*\s*\d+[A-Z]?)/i,
+    /([A-Z]{1,3}\s*\d+[A-Z]?)/i
+  ];
+  
+  let card_number = "";
+  for (const pattern of numberPatterns) {
+    const match = text.match(pattern);
+    if (match) {
+      card_number = match[1].trim();
+      break;
+    }
+  }
+  
+  // Normalize card number variants
+  const normalizedNumber = card_number.replace(/\s+/g, "-");
+  const compactNumber = card_number.replace(/\s+/g, "");
+  
+  // Extract player name (look for proper names in text)
+  const namePatterns = [
+    /([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})/g,
+    /([A-Z][a-z]+\s+[A-Z][a-z]+)/g
+  ];
+  
+  let player = "";
+  for (const pattern of namePatterns) {
+    const matches = text.match(pattern) || [];
+    // Find the longest name that looks like a person
+    const candidate = matches
+      .filter(name => name.split(' ').length >= 2)
+      .sort((a, b) => b.length - a.length)[0];
+    if (candidate) {
+      player = candidate;
+      break;
+    }
+  }
+  
+  // Detect variant
+  const variantPatterns = [
+    { pattern: /\b(rc|rookie)\b/i, variant: "RC" },
+    { pattern: /\b(refractor)\b/i, variant: "Refractor" },
+    { pattern: /\b(silver)\b/i, variant: "Silver" },
+    { pattern: /\b(holo|holofoil)\b/i, variant: "Holo" },
+    { pattern: /\b(base)\b/i, variant: "Base" }
+  ];
+  
+  const variant = variantPatterns.find(({ pattern }) => pattern.test(text))?.variant || "";
+  
+  // Default grade to Raw
+  const grade: Identity["grade"] = "Raw";
+  
+  // Build query
+  const queryParts = [year, set, player, card_number].filter(Boolean);
+  const query = queryParts.join(" ");
+  
+  // Generate alternative queries
+  const alt_queries: string[] = [];
+  
+  // Add normalized number variants
+  if (card_number && normalizedNumber !== card_number) {
+    alt_queries.push(query.replace(card_number, normalizedNumber));
+  }
+  if (card_number && compactNumber !== card_number) {
+    alt_queries.push(query.replace(card_number, compactNumber));
+  }
+  
+  // Add SS expansion for Spotless Spans
+  if (card_number.toLowerCase().startsWith('ss')) {
+    const ssExpansion = query.replace(card_number, `Spotless Spans ${card_number.substring(2)}`);
+    alt_queries.push(ssExpansion);
+  }
+  
+  // Calculate confidence
+  let confidence = 0.55; // Base confidence
+  if (player && (set || card_number)) {
+    confidence = 0.75;
+  }
+  
+  return {
+    player,
+    year,
+    set,
+    card_number,
+    variant,
+    grade,
+    confidence,
+    query: query || "trading card",
+    alt_queries
+  };
+}
+
+// CORS preflight handler
+export async function OPTIONS() {
+  return okEmpty();
+}
+
+// Main analyze endpoint
+export async function POST(req: Request) {
+  try {
+    const body = await req.json();
+    const { imageDataUrl, imageUrl } = body;
+    
+    if (!imageDataUrl && !imageUrl) {
+      return new Response(
+        JSON.stringify({ error: "Either imageDataUrl or imageUrl must be provided" } as AnalyzeError),
+        { 
+          status: 400, 
+          headers: { 
+            "content-type": "application/json", 
+            ...corsHeaders() 
+          } 
+        }
+      );
+    }
+    
+    // Process image
+    let imageBase64: string;
+    if (imageDataUrl) {
+      imageBase64 = await processImageDataUrl(imageDataUrl);
+    } else {
+      imageBase64 = await processImageUrl(imageUrl!);
+    }
+    
+    // Call Google Vision API
+    const visionResponse = await callGoogleVisionAPI(imageBase64);
+    
+    if (!visionResponse.responses || !visionResponse.responses[0]) {
+      throw new Error("Invalid response from Google Vision API");
+    }
+    
+    const response = visionResponse.responses[0];
+    const webDetection = response.webDetection;
+    const textDetection = response.textDetection;
+    
+    // Parse the card identity
+    const identity = parseCardIdentity(webDetection, textDetection);
+    
+    // For now, return empty history (will be implemented later)
+    const history: HistoryEntry[] = [];
+    
+    const result: AnalyzeResponse = {
+      identity,
+      history
+    };
+    
+    return okJSON(result);
+    
+  } catch (error: any) {
+    console.error("Analyze error:", error);
+    
+    const errorResponse: AnalyzeError = {
+      error: error.message || "Analysis failed"
+    };
+    
+    const status = error.message?.includes("not set") ? 400 : 
+                  error.message?.includes("too large") ? 413 : 500;
+    
+    return new Response(
+      JSON.stringify(errorResponse),
+      { 
+        status, 
+        headers: { 
+          "content-type": "application/json", 
+          ...corsHeaders() 
+        } 
+      }
+    );
+  }
+}
+
+/*
+CURL Examples for testing:
+
+# Test with imageDataUrl (base64 data URL):
+curl -X POST https://your-app.vercel.app/api/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"imageDataUrl": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD..."}'
+
+# Test with imageUrl (public image URL):
+curl -X POST https://your-app.vercel.app/api/analyze \
+  -H "Content-Type: application/json" \
+  -d '{"imageUrl": "https://example.com/card-image.jpg"}'
+
+# Test CORS preflight:
+curl -X OPTIONS https://your-app.vercel.app/api/analyze \
+  -H "Origin: chrome-extension://your-extension-id" \
+  -H "Access-Control-Request-Method: POST" \
+  -H "Access-Control-Request-Headers: Content-Type"
+*/
