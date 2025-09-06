@@ -1,3 +1,4 @@
+import vision from "@google-cloud/vision";
 import { okJSON, okEmpty, corsHeaders } from "../_cors";
 
 export const runtime = "nodejs";
@@ -35,6 +36,10 @@ function ensureEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`${name} not set`);
   return v;
+}
+
+function normalizePrivateKey(pk: string|undefined): string {
+  return pk ? pk.replace(/\n/g, "\n").replace(/\\n/g, "\n") : "";
 }
 
 function validateImageSize(base64: string): void {
@@ -78,35 +83,26 @@ async function processImageUrl(imageUrl: string): Promise<string> {
 }
 
 async function callGoogleVisionAPI(imageBase64: string): Promise<any> {
-  const apiKey = ensureEnv("GOOGLE_VISION_API_KEY");
-  const url = `https://vision.googleapis.com/v1/images:annotate?key=${apiKey}`;
-  
-  const requestBody = {
-    requests: [{
-      image: {
-        content: imageBase64
-      },
-      features: [
-        { type: "WEB_DETECTION", maxResults: 10 },
-        { type: "TEXT_DETECTION", maxResults: 10 }
-      ]
-    }]
-  };
-
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(requestBody)
+  const client = new vision.ImageAnnotatorClient({
+    projectId: ensureEnv("GOOGLE_PROJECT_ID"),
+    credentials: { 
+      client_email: ensureEnv("GOOGLE_CLIENT_EMAIL"), 
+      private_key: normalizePrivateKey(process.env.GOOGLE_PRIVATE_KEY) 
+    }
   });
 
-  if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`Google Vision API error: ${response.status} - ${errorText}`);
-  }
-
-  return await response.json();
+  const image = { content: imageBase64 };
+  
+  // Get both text detection and web detection
+  const [textResult] = await client.textDetection({ image });
+  const [webResult] = await client.webDetection({ image });
+  
+  return {
+    responses: [{
+      textDetection: textResult,
+      webDetection: webResult
+    }]
+  };
 }
 
 function parseCardIdentity(webDetection: any, textDetection: any): Identity {
@@ -317,4 +313,9 @@ curl -X OPTIONS https://your-app.vercel.app/api/analyze \
   -H "Origin: chrome-extension://your-extension-id" \
   -H "Access-Control-Request-Method: POST" \
   -H "Access-Control-Request-Headers: Content-Type"
+
+Environment Variables Required:
+- GOOGLE_PROJECT_ID
+- GOOGLE_CLIENT_EMAIL  
+- GOOGLE_PRIVATE_KEY
 */
