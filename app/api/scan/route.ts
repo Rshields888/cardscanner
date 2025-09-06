@@ -6,6 +6,19 @@ export const runtime = "nodejs";
 export const maxDuration = 15;
 function ensureEnv(name: string){ const v = process.env[name]; if(!v) throw new Error(`Missing env: ${name}`); return v; }
 function normalizePrivateKey(pk: string|undefined){ return pk ? pk.replace(/\n/g, "\n").replace(/\\n/g, "\n") : ""; }
+// Card identity type
+type CardIdentity = {
+  player: string;
+  year: string;
+  set: string;
+  card_number: string;
+  variant: string;
+  grade: "Raw" | "PSA 10" | "PSA 9" | "SGC 10" | "SGC 9.5" | "SGC 9" | "BGS 10" | "BGS 9.5" | "BGS 9";
+  confidence: number;
+  query: string;
+  alt_queries: string[];
+};
+
 function buildQueryFromText(text: string){
   const lower = text.toLowerCase();
   const yearMatch = lower.match(/\b(19|20)\d{2}\b/);
@@ -17,6 +30,114 @@ function buildQueryFromText(text: string){
   const parts = [yearMatch?.[0], brand, nameMatch, (numMatch ? ("#"+numMatch[1]) : ""), ...flags].filter(Boolean);
   const q = parts.join(" ").replace(/\s+/g," ").trim();
   return q || text.split("\n")[0] || "trading card";
+}
+
+function parseCardIdentity(text: string): CardIdentity {
+  // Extract year
+  const yearMatch = text.match(/\b(19|20)\d{2}\b/);
+  const year = yearMatch ? yearMatch[0] : "";
+  
+  // Detect set names
+  const setPatterns = [
+    "Topps", "Bowman", "Panini", "Prizm", "Select", "Mosaic", "Donruss", 
+    "Chrome", "Allen & Ginter", "Optic", "Fleer", "Upper Deck", "Score"
+  ];
+  const set = setPatterns.find(setName => 
+    text.toLowerCase().includes(setName.toLowerCase())
+  ) || "";
+  
+  // Extract card number with normalization
+  const numberPatterns = [
+    /#\s*([A-Z]*\s*\d+[A-Z]?)/i,
+    /no\.\s*([A-Z]*\s*\d+[A-Z]?)/i,
+    /card\s*#?\s*([A-Z]*\s*\d+[A-Z]?)/i,
+    /([A-Z]{1,3}\s*\d+[A-Z]?)/i
+  ];
+  
+  let card_number = "";
+  for (const pattern of numberPatterns) {
+    const match = text.match(pattern);
+    if (match) {
+      card_number = match[1].trim();
+      break;
+    }
+  }
+  
+  // Normalize card number variants
+  const normalizedNumber = card_number.replace(/\s+/g, "-");
+  const compactNumber = card_number.replace(/\s+/g, "");
+  
+  // Extract player name (look for proper names in text)
+  const namePatterns = [
+    /([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})/g,
+    /([A-Z][a-z]+\s+[A-Z][a-z]+)/g
+  ];
+  
+  let player = "";
+  for (const pattern of namePatterns) {
+    const matches = text.match(pattern) || [];
+    // Find the longest name that looks like a person
+    const candidate = matches
+      .filter(name => name.split(' ').length >= 2)
+      .sort((a, b) => b.length - a.length)[0];
+    if (candidate) {
+      player = candidate;
+      break;
+    }
+  }
+  
+  // Detect variant
+  const variantPatterns = [
+    { pattern: /\b(rc|rookie)\b/i, variant: "RC" },
+    { pattern: /\b(refractor)\b/i, variant: "Refractor" },
+    { pattern: /\b(silver)\b/i, variant: "Silver" },
+    { pattern: /\b(holo|holofoil)\b/i, variant: "Holo" },
+    { pattern: /\b(base)\b/i, variant: "Base" }
+  ];
+  
+  const variant = variantPatterns.find(({ pattern }) => pattern.test(text))?.variant || "";
+  
+  // Default grade to Raw
+  const grade: CardIdentity["grade"] = "Raw";
+  
+  // Build query
+  const queryParts = [year, set, player, card_number].filter(Boolean);
+  const query = queryParts.join(" ");
+  
+  // Generate alternative queries
+  const alt_queries: string[] = [];
+  
+  // Add normalized number variants
+  if (card_number && normalizedNumber !== card_number) {
+    alt_queries.push(query.replace(card_number, normalizedNumber));
+  }
+  if (card_number && compactNumber !== card_number) {
+    alt_queries.push(query.replace(card_number, compactNumber));
+  }
+  
+  // Add SS expansion for Spotless Spans
+  if (card_number.toLowerCase().startsWith('ss')) {
+    const ssExpansion = query.replace(card_number, `Spotless Spans ${card_number.substring(2)}`);
+    alt_queries.push(ssExpansion);
+  }
+  
+  // Calculate confidence
+  let confidence = 0.55; // Base confidence
+  if (player && (set || card_number)) {
+    confidence = 0.75;
+  }
+  
+  return {
+    player,
+    year,
+    set,
+    card_number,
+    variant,
+    grade,
+    confidence,
+    query: query || "trading card",
+    alt_queries
+  };
 }
 export async function OPTIONS(){ return okEmpty(); }
 export async function POST(req: Request){
@@ -38,6 +159,7 @@ export async function POST(req: Request){
     const [result] = await client.textDetection({ image: { content: buf } });
     const text = result?.fullTextAnnotation?.text || "";
     const query = buildQueryFromText(text);
+    const cardIdentity = parseCardIdentity(text);
     const manual = String(form.get('manual')||'0') === '1';
     let comps = null;
     let compsError = null;
@@ -84,7 +206,8 @@ export async function POST(req: Request){
       title: query, 
       comps, 
       compsError,
-      ocrText: text?.slice(0,1000) || null 
+      ocrText: text?.slice(0,1000) || null,
+      identity: cardIdentity
     });
   }catch(e:any){
     return new Response(JSON.stringify({ error: e?.message || "scan failed" }), { status: 500, headers: { "content-type":"application/json", ...corsHeaders() } });
