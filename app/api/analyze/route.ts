@@ -36,6 +36,14 @@ export async function OPTIONS() {
   });
 }
 
+// Helper to convert data URL to base64 (fallback)
+function dataUrlToBase64(dataUrl: string): string {
+  if (!/^data:image\/(png|jpe?g);base64,/.test(dataUrl)) {
+    throw new Error('imageDataUrl must be a valid base64 data URL');
+  }
+  return dataUrl.split(',')[1];
+}
+
 // Helper to convert data URL to base64 and optimize image
 async function optimizeImageForGPT(dataUrl: string): Promise<string> {
   if (!/^data:image\/(png|jpe?g);base64,/.test(dataUrl)) {
@@ -57,22 +65,22 @@ async function optimizeImageForGPT(dataUrl: string): Promise<string> {
       throw new Error('Could not get image dimensions for optimization');
     }
 
-    // Calculate aggressive crop area: remove 25% from each side (total 50% reduction)
-    // This focuses on the central 50% of the image, perfect for centered cards like Whatnot streams
-    const cropPercentage = 0.5; // Keep only 50% of the original image (center crop)
+    // Calculate ultra-aggressive crop area: remove 30% from each side (total 60% reduction)
+    // This focuses on the central 40% of the image, perfect for centered cards
+    const cropPercentage = 0.4; // Keep only 40% of the original image (ultra center crop)
     const cropWidth = Math.floor(originalWidth * cropPercentage);
     const cropHeight = Math.floor(originalHeight * cropPercentage);
     const left = Math.floor((originalWidth - cropWidth) / 2);
     const top = Math.floor((originalHeight - cropHeight) / 2);
 
-    // Optimize image for GPT Vision API - maximum speed optimization
+    // Ultra-fast image optimization for GPT Vision API
     const optimized = await sharp(buffer)
-      .extract({ left, top, width: cropWidth, height: cropHeight }) // Apply aggressive center crop
-      .resize(600, 600, {  // Even smaller size for maximum speed
+      .extract({ left, top, width: cropWidth, height: cropHeight }) // Apply ultra center crop
+      .resize(400, 400, {  // Much smaller size for maximum speed
         fit: 'inside',
         withoutEnlargement: true
       })
-      .jpeg({ quality: 80 }) // Balanced quality for speed
+      .jpeg({ quality: 70, progressive: false, mozjpeg: true }) // Fastest JPEG encoding
       .toBuffer();
 
     return optimized.toString('base64');
@@ -175,11 +183,22 @@ export async function POST(req: Request) {
       apiKey: process.env.OPENAI_API_KEY,
     });
 
-    // Prepare image for OpenAI Vision
+    // Prepare image for OpenAI Vision with timeout
     let imageContent: string;
     if (imageDataUrl) {
-      // Optimize and crop the image for better GPT performance
-      imageContent = await optimizeImageForGPT(imageDataUrl);
+      try {
+        // Optimize and crop the image for better GPT performance with timeout
+        imageContent = await Promise.race([
+          optimizeImageForGPT(imageDataUrl),
+          new Promise<string>((_, reject) => 
+            setTimeout(() => reject(new Error('Image optimization timeout')), 3000)
+          )
+        ]);
+      } catch (error) {
+        console.warn('Image optimization failed, using original:', error);
+        // Fallback to original image if optimization fails or times out
+        imageContent = dataUrlToBase64(imageDataUrl);
+      }
     } else if (imageUrl) {
       // For imageUrl, we'll pass it directly to OpenAI
       imageContent = imageUrl;
@@ -187,33 +206,24 @@ export async function POST(req: Request) {
       throw new Error('No valid image provided');
     }
 
-    // Create the vision prompt
-    const prompt = `Analyze this trading card image and extract the following information. Return ONLY valid JSON with no additional text, explanations, or markdown formatting.
-
+    // Ultra-short prompt for maximum speed
+    const prompt = `Extract card data as JSON only:
 {
   "year": number or null,
   "player": string or null,
   "team": string or null,
   "card_number": string or null,
   "set": string or null,
-  "subset": string or null,
   "company": string or null,
   "is_rookie": boolean or null,
   "parallel": string or null,
-  "card_type": string or null,
   "grade": string or null,
   "canonical_name": string or null,
   "alt_queries": []
 }
+Return JSON only. Use null for unknown. Grade="Raw" if ungraded.`;
 
-Rules:
-- Return ONLY the JSON object, no other text
-- Use null for unknown fields
-- Set grade to "Raw" for ungraded cards
-- Include 2-3 alt_queries for search variations
-- Be precise and conservative`;
-
-    // Make the OpenAI Vision API call with speed optimizations
+    // Make the OpenAI Vision API call with ultra-speed optimizations
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -233,11 +243,13 @@ Rules:
           ]
         }
       ],
-      max_tokens: 300,        // Even more reduced for maximum speed
+      max_tokens: 200,        // Ultra-reduced for maximum speed
       temperature: 0,         // More deterministic, faster
       top_p: 0.1,            // More focused responses
       frequency_penalty: 0,   // No penalty for repetition
       presence_penalty: 0     // No penalty for new topics
+    }, {
+      timeout: 10000          // 10 second timeout
     });
 
     const gptResponse = response.choices[0]?.message?.content;
