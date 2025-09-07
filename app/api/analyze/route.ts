@@ -47,10 +47,23 @@ function dataUrlToBase64(dataUrl: string): string {
 // Helper to validate and coerce GPT response
 function validateAndCoerceIdentity(rawResponse: any): Identity {
   try {
-    // Try to parse as JSON if it's a string
     let parsed = rawResponse;
+    
     if (typeof rawResponse === 'string') {
-      parsed = JSON.parse(rawResponse);
+      // Clean up the response string
+      let cleanedResponse = rawResponse.trim();
+      
+      // Remove any markdown code blocks
+      cleanedResponse = cleanedResponse.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+      
+      // Try to extract JSON from the response if it contains extra text
+      const jsonMatch = cleanedResponse.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        cleanedResponse = jsonMatch[0];
+      }
+      
+      // Parse the cleaned JSON
+      parsed = JSON.parse(cleanedResponse);
     }
 
     // Validate with Zod schema
@@ -64,6 +77,7 @@ function validateAndCoerceIdentity(rawResponse: any): Identity {
     return validated;
   } catch (error) {
     console.warn('Failed to validate GPT response, using fallback:', error);
+    console.warn('Raw response was:', rawResponse);
     
     // Return a safe fallback
     return {
@@ -134,31 +148,30 @@ export async function POST(req: Request) {
     }
 
     // Create the vision prompt
-    const prompt = `Analyze this trading card image and extract the following information in JSON format. Be precise and only include information you can clearly see. If uncertain about any field, use null.
+    const prompt = `Analyze this trading card image and extract the following information. Return ONLY valid JSON with no additional text, explanations, or markdown formatting.
 
-Required JSON structure:
 {
-  "year": number or null (e.g., 2023, 2024),
-  "player": string or null (player name),
-  "team": string or null (team name),
-  "card_number": string or null (card number like "22", "BDC-121", "SS-38"),
-  "set": string or null (set name like "Topps Chrome", "Bowman Draft", "Prizm"),
-  "subset": string or null (subset if applicable),
-  "company": string or null (producing company like "Topps", "Panini", "Bowman"),
-  "is_rookie": boolean or null (true if this is a rookie card),
-  "parallel": string or null (parallel/variant like "Green Prizm", "Silver", "Holo", "Refractor"),
-  "card_type": string or null (type like "Base", "Auto", "Refractor", "Holo"),
-  "grade": string or null (grade like "Raw", "PSA 5", "PSA 10", "BGS 9.5"),
-  "canonical_name": string or null (full card name like "2024 Panini Prizm Caitlin Clark Green #22"),
-  "alt_queries": array of strings (helpful search variations)
+  "year": number or null,
+  "player": string or null,
+  "team": string or null,
+  "card_number": string or null,
+  "set": string or null,
+  "subset": string or null,
+  "company": string or null,
+  "is_rookie": boolean or null,
+  "parallel": string or null,
+  "card_type": string or null,
+  "grade": string or null,
+  "canonical_name": string or null,
+  "alt_queries": []
 }
 
-Important:
-- If you see a graded card (PSA, BGS, etc.), set the grade field accordingly
-- If it's a raw card, set grade to "Raw"
-- For alt_queries, provide 2-3 search variations (shorter versions, different word orders)
-- Be conservative - prefer null over guessing
-- Return ONLY the JSON, no other text`;
+Rules:
+- Return ONLY the JSON object, no other text
+- Use null for unknown fields
+- Set grade to "Raw" for ungraded cards
+- Include 2-3 alt_queries for search variations
+- Be precise and conservative`;
 
     // Make the OpenAI Vision API call
     const response = await openai.chat.completions.create({
