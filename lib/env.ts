@@ -6,12 +6,12 @@ export function fixPk(pk?: string) {
   return (pk || '').replace(/\r/g, '').replace(/\\n/g, '\n');
 }
 export function envDiag() {
-  const needs = [
+  const need = [
     ['projectId', ['GOOGLE_PROJECT_ID','GCP_PROJECT_ID']],
     ['clientEmail', ['GOOGLE_CLIENT_EMAIL','GCP_CLIENT_EMAIL']],
     ['privateKey', ['GOOGLE_PRIVATE_KEY','GCP_PRIVATE_KEY']],
   ] as const;
   const missing: string[] = [];
-  for (const [, opts] of needs) if (!pickEnv(...opts)) missing.push(opts.join('|'));
-  return { ok: missing.length===0, missing };
+  for (const [, opts] of need) if (!pickEnv(...opts)) missing.push(opts.join('|'));
+  return { ok: missing.length === 0, missing };
 }
