@@ -73,14 +73,14 @@ async function optimizeImageForGPT(dataUrl: string): Promise<string> {
     const left = Math.floor((originalWidth - cropWidth) / 2);
     const top = Math.floor((originalHeight - cropHeight) / 2);
 
-    // Ultra-fast image optimization for GPT Vision API
+    // Optimized image processing for 5s target with good quality
     const optimized = await sharp(buffer)
-      .extract({ left, top, width: cropWidth, height: cropHeight }) // Apply ultra center crop
-      .resize(400, 400, {  // Much smaller size for maximum speed
+      .extract({ left, top, width: cropWidth, height: cropHeight }) // Apply center crop
+      .resize(500, 500, {  // Balanced size for speed and quality
         fit: 'inside',
         withoutEnlargement: true
       })
-      .jpeg({ quality: 70, progressive: false, mozjpeg: true }) // Fastest JPEG encoding
+      .jpeg({ quality: 75, progressive: false, mozjpeg: true }) // Balanced quality
       .toBuffer();
 
     return optimized.toString('base64');
@@ -191,7 +191,7 @@ export async function POST(req: Request) {
         imageContent = await Promise.race([
           optimizeImageForGPT(imageDataUrl),
           new Promise<string>((_, reject) => 
-            setTimeout(() => reject(new Error('Image optimization timeout')), 3000)
+            setTimeout(() => reject(new Error('Image optimization timeout')), 5000)
           )
         ]);
       } catch (error) {
@@ -206,8 +206,8 @@ export async function POST(req: Request) {
       throw new Error('No valid image provided');
     }
 
-    // Ultra-short prompt for maximum speed
-    const prompt = `Extract card data as JSON only:
+    // Optimized prompt for 5s target with all required fields
+    const prompt = `Extract trading card data as JSON. Focus on these key fields:
 {
   "year": number or null,
   "player": string or null,
@@ -221,7 +221,10 @@ export async function POST(req: Request) {
   "canonical_name": string or null,
   "alt_queries": []
 }
-Return JSON only. Use null for unknown. Grade="Raw" if ungraded.`;
+
+CRITICAL: Check for rookie indicators (RC, Rookie, etc.). Identify parallel/variant (Prizm, Chrome, Refractor, etc.). 
+Look for grading (PSA, BGS, SGC labels). Set grade="Raw" if ungraded.
+Return JSON only.`;
 
     // Make the OpenAI Vision API call with ultra-speed optimizations
     const response = await openai.chat.completions.create({
@@ -243,13 +246,13 @@ Return JSON only. Use null for unknown. Grade="Raw" if ungraded.`;
           ]
         }
       ],
-      max_tokens: 200,        // Ultra-reduced for maximum speed
+      max_tokens: 350,        // Increased for thorough analysis
       temperature: 0,         // More deterministic, faster
       top_p: 0.1,            // More focused responses
       frequency_penalty: 0,   // No penalty for repetition
       presence_penalty: 0     // No penalty for new topics
     }, {
-      timeout: 10000          // 10 second timeout
+      timeout: 15000          // 15 second timeout for thorough analysis
     });
 
     const gptResponse = response.choices[0]?.message?.content;
