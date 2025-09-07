@@ -65,9 +65,9 @@ async function optimizeImageForGPT(dataUrl: string): Promise<string> {
       throw new Error('Could not get image dimensions for optimization');
     }
 
-    // Calculate ultra-aggressive crop area: remove 30% from each side (total 60% reduction)
-    // This focuses on the central 40% of the image, perfect for centered cards
-    const cropPercentage = 0.4; // Keep only 40% of the original image (ultra center crop)
+    // Calculate aggressive crop area: remove 25% from each side (total 50% reduction)
+    // This focuses on the central 50% of the image, perfect for centered cards
+    const cropPercentage = 0.5; // Keep 50% of the original image (center crop)
     const cropWidth = Math.floor(originalWidth * cropPercentage);
     const cropHeight = Math.floor(originalHeight * cropPercentage);
     const left = Math.floor((originalWidth - cropWidth) / 2);
