@@ -4,16 +4,16 @@ This document describes the API endpoints that are compatible with the Chrome ex
 
 ## Environment Variables Required
 
-- `GOOGLE_PROJECT_ID` - Google Cloud project ID
-- `GOOGLE_CLIENT_EMAIL` - Google service account email
-- `GOOGLE_PRIVATE_KEY` - Google service account private key (with \n for newlines)
+- `GCP_PROJECT_ID` - Google Cloud project ID
+- `GCP_CLIENT_EMAIL` - Google service account email
+- `GCP_PRIVATE_KEY` - Google service account private key (with \n for newlines)
 - `EBAY_APP_ID` - eBay application ID for API access
 
 ## Endpoints
 
 ### 1. `/api/analyze` - Card Image Analysis
 
-**Purpose**: Analyzes card images using Google Vision API and returns structured card identity.
+**Purpose**: Analyzes card images using Google Vision API with DOCUMENT_TEXT_DETECTION, WEB_DETECTION, and LOGO_DETECTION. Includes automatic image upscaling for better OCR on small screenshots.
 
 **Method**: `POST`
 
@@ -22,8 +22,7 @@ This document describes the API endpoints that are compatible with the Chrome ex
 **Request Body**:
 ```json
 {
-  "imageDataUrl": "data:image/jpeg;base64,/9j/4AAQ...", // OR
-  "imageUrl": "https://example.com/card-image.jpg"
+  "imageDataUrl": "data:image/jpeg;base64,/9j/4AAQ..."
 }
 ```
 
@@ -31,17 +30,18 @@ This document describes the API endpoints that are compatible with the Chrome ex
 ```json
 {
   "identity": {
+    "canonical_name": "Jacob Wilson — Bowman",
     "player": "Jacob Wilson",
     "year": "2023",
     "set": "Bowman",
     "card_number": "BDC-121",
     "variant": "RC",
-    "grade": "Raw",
-    "confidence": 0.75,
+    "grading": null,
     "query": "2023 Bowman Jacob Wilson BDC-121 RC",
-    "alt_queries": ["2023 Bowman Jacob Wilson BDC121 RC", "2023 Bowman Jacob Wilson Spotless Spans 121 RC"]
-  },
-  "history": []
+    "alt_queries": ["Bowman Jacob Wilson BDC-121 RC", "2023 Bowman Jacob Wilson"],
+    "ocr_text_debug": "2023 Bowman Draft Chrome Jacob Wilson BDC-121 RC...",
+    "web_titles_debug": ["2023 Bowman Jacob Wilson Card", "Jacob Wilson Rookie Card"]
+  }
 }
 ```
 
@@ -111,6 +111,14 @@ Both endpoints support CORS for Chrome extensions:
 3. **Extract `identity.query` and `identity.alt_queries`** from response
 4. **POST to `/api/ebay/comps`** with query data
 5. **Display results** in overlay
+
+## New Features in /api/analyze
+
+- **Image Upscaling**: Automatically upscales images smaller than 800px height to 1200px for better OCR
+- **Enhanced Detection**: Uses DOCUMENT_TEXT_DETECTION, WEB_DETECTION, and LOGO_DETECTION
+- **Better Parsing**: Improved player name extraction and set detection
+- **Debug Fields**: Includes `ocr_text_debug` and `web_titles_debug` for troubleshooting
+- **Canonical Names**: Returns `canonical_name` in "Player — Set" format
 
 ## Error Handling
 
