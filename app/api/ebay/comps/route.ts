@@ -1,27 +1,28 @@
-import { okJSON, okEmpty, corsHeaders } from "../../_cors";
+export const runtime = 'edge';
 
-export const runtime = "nodejs";
-export const maxDuration = 15;
+import { corsHeaders, okJSON } from "../../_cors";
+import { findCompletedComps } from "@/lib/ebay";
+import { buildSearchQueries } from "@/lib/query-builder";
 
 // Type definitions
 type CompsRequest = {
   query: string;
   alt_queries?: string[];
   grade?: string;
+  // Legacy support for extension
+  history?: any;
+  stats?: any;
 };
 
 type HistoryEntry = {
-  date: string;
   price: number;
-  title: string;
+  shipping: number;
+  date: string;
   url: string;
 };
 
 type Stats = {
-  count: number;
   median: number;
-  p10: number;
-  p90: number;
 };
 
 type CompsResponse = {
@@ -56,7 +57,8 @@ function normalizeCurrency(price: number, currency: string): number {
 function isJunkListing(title: string): boolean {
   const junkKeywords = [
     'lot', 'bundle', 'repack', 'custom', 'mystery', 'stickers', 
-    'box', 'hobby', 'case', 'blaster', 'auction photo'
+    'box', 'hobby', 'case', 'blaster', 'auction photo', 'proxy',
+    'reprint', 'fake', 'replica'
   ];
   
   const lowerTitle = title.toLowerCase();
@@ -75,7 +77,7 @@ function deduplicateListings(listings: HistoryEntry[]): HistoryEntry[] {
   const seen = new Map<string, HistoryEntry>();
   
   for (const listing of listings) {
-    const normalizedTitle = normalizeTitle(listing.title);
+    const normalizedTitle = normalizeTitle(listing.url); // Use URL for deduplication
     const key = `${normalizedTitle}_${Math.round(listing.price * 2) / 2}`;
     
     if (!seen.has(key) || seen.get(key)!.price > listing.price) {
@@ -86,66 +88,56 @@ function deduplicateListings(listings: HistoryEntry[]): HistoryEntry[] {
   return Array.from(seen.values());
 }
 
-function calculateStats(prices: number[]): Stats {
-  if (prices.length === 0) {
-    return { count: 0, median: 0, p10: 0, p90: 0 };
-  }
+function calculateMedian(prices: number[]): number {
+  if (prices.length === 0) return 0;
   
   const sorted = prices.sort((a, b) => a - b);
   const count = sorted.length;
   
-  const median = count % 2 === 0 
+  return count % 2 === 0 
     ? (sorted[count / 2 - 1] + sorted[count / 2]) / 2
     : sorted[Math.floor(count / 2)];
-  
-  const p10 = sorted[Math.floor(count * 0.1)];
-  const p90 = sorted[Math.floor(count * 0.9)];
-  
-  return { count, median, p10, p90 };
 }
 
-async function searchEbay(query: string, appId: string): Promise<HistoryEntry[]> {
-  // Mock eBay API response - replace with real eBay API call
-  const mockResults: HistoryEntry[] = [
-    {
-      date: "2024-01-15",
-      price: 25.99,
-      title: "2023 Bowman Draft Chrome Jacob Wilson BDC-121 RC",
-      url: "https://ebay.com/itm/123456789"
-    },
-    {
-      date: "2024-01-14", 
-      price: 22.50,
-      title: "2023 Bowman Draft Chrome Jacob Wilson BDC-121 RC",
-      url: "https://ebay.com/itm/123456790"
-    },
-    {
-      date: "2024-01-13",
-      price: 28.75,
-      title: "2023 Bowman Draft Chrome Jacob Wilson BDC-121 RC",
-      url: "https://ebay.com/itm/123456791"
-    }
-  ];
-  
-  // Filter out junk listings
-  const filtered = mockResults.filter(listing => !isJunkListing(listing.title));
-  
-  // Deduplicate
-  return deduplicateListings(filtered);
+function formatDate(dateString: string): string {
+  try {
+    const date = new Date(dateString);
+    return date.toISOString().split('T')[0]; // YYYY-MM-DD format
+  } catch {
+    return new Date().toISOString().split('T')[0];
+  }
 }
 
 // CORS preflight handler
 export async function OPTIONS() {
-  return okEmpty();
+  return new Response(null, { 
+    status: 204, 
+    headers: corsHeaders() 
+  });
 }
 
 // Main comps endpoint
 export async function POST(req: Request) {
   try {
     const body: CompsRequest = await req.json();
-    const { query, alt_queries = [], grade } = body;
     
-    if (!query) {
+    // Support both new format and legacy extension format
+    let query: string;
+    let alt_queries: string[] = [];
+    let grade: string | undefined;
+    
+    if (body.query) {
+      // New format from GPT analysis
+      query = body.query;
+      alt_queries = body.alt_queries || [];
+      grade = body.grade;
+    } else if (body.history && body.stats) {
+      // Legacy format from extension - return as-is for compatibility
+      return okJSON({
+        history: body.history,
+        stats: body.stats
+      });
+    } else {
       return new Response(
         JSON.stringify({ error: "Query is required" } as CompsError),
         { 
@@ -161,28 +153,53 @@ export async function POST(req: Request) {
     // Get eBay app ID
     const appId = ensureEnv("EBAY_APP_ID");
     
-    // Search eBay for the main query
-    let allListings = await searchEbay(query, appId);
+    // Try primary query first
+    let allListings: HistoryEntry[] = [];
+    let searchQueries = [query, ...alt_queries];
     
-    // Search alternative queries if provided
-    for (const altQuery of alt_queries) {
-      const altListings = await searchEbay(altQuery, appId);
-      allListings = [...allListings, ...altListings];
+    for (const searchQuery of searchQueries) {
+      try {
+        console.log(`Searching eBay for: ${searchQuery}`);
+        const ebayResult = await findCompletedComps(searchQuery, appId, true);
+        
+        // Convert eBay results to our format
+        const listings: HistoryEntry[] = ebayResult.items
+          .filter(item => !isJunkListing(item.title))
+          .map(item => ({
+            price: normalizeCurrency(item.price, item.currency),
+            shipping: 0, // eBay API doesn't always provide shipping separately
+            date: formatDate(item.ended || new Date().toISOString()),
+            url: item.url || ''
+          }));
+        
+        allListings = [...allListings, ...listings];
+        
+        // If we have enough results, break early
+        if (allListings.length >= 20) {
+          break;
+        }
+      } catch (error) {
+        console.warn(`Failed to search for "${searchQuery}":`, error);
+        // Continue with next query
+      }
     }
     
-    // Remove duplicates again after combining results
+    // Remove duplicates
     allListings = deduplicateListings(allListings);
     
-    // Sort by date ascending
+    // Sort by date ascending (oldest first)
     allListings.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     
-    // Calculate statistics
-    const prices = allListings.map(listing => listing.price);
-    const stats = calculateStats(prices);
+    // Take most recent 50 results
+    allListings = allListings.slice(-50);
+    
+    // Calculate median price
+    const prices = allListings.map(listing => listing.price + listing.shipping);
+    const median = calculateMedian(prices);
     
     const result: CompsResponse = {
       history: allListings,
-      stats
+      stats: { median }
     };
     
     return okJSON(result);
@@ -208,23 +225,3 @@ export async function POST(req: Request) {
     );
   }
 }
-
-/*
-CURL Examples for testing:
-
-# Test with query:
-curl -X POST https://your-app.vercel.app/api/ebay/comps \
-  -H "Content-Type: application/json" \
-  -d '{"query": "2023 Topps Elly De La Cruz SS-38 RC"}'
-
-# Test with alt_queries:
-curl -X POST https://your-app.vercel.app/api/ebay/comps \
-  -H "Content-Type: application/json" \
-  -d '{"query": "2023 Bowman Jacob Wilson BDC-121", "alt_queries": ["2023 Bowman Jacob Wilson BDC121", "2023 Bowman Jacob Wilson Spotless Spans 121"]}'
-
-# Test CORS preflight:
-curl -X OPTIONS https://your-app.vercel.app/api/ebay/comps \
-  -H "Origin: chrome-extension://your-extension-id" \
-  -H "Access-Control-Request-Method: POST" \
-  -H "Access-Control-Request-Headers: Content-Type"
-*/
