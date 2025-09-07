@@ -57,22 +57,22 @@ async function optimizeImageForGPT(dataUrl: string): Promise<string> {
       throw new Error('Could not get image dimensions for optimization');
     }
 
-    // Calculate crop area: remove 5% from each side (total 10% reduction in width/height)
-    // This focuses on the central 90% of the image, assuming the card is generally there.
-    const cropPercentage = 0.9; // Keep 90% of the original image
+    // Calculate aggressive crop area: remove 25% from each side (total 50% reduction)
+    // This focuses on the central 50% of the image, perfect for centered cards like Whatnot streams
+    const cropPercentage = 0.5; // Keep only 50% of the original image (center crop)
     const cropWidth = Math.floor(originalWidth * cropPercentage);
     const cropHeight = Math.floor(originalHeight * cropPercentage);
     const left = Math.floor((originalWidth - cropWidth) / 2);
     const top = Math.floor((originalHeight - cropHeight) / 2);
 
-    // Optimize image for GPT Vision API - smaller size for faster processing
+    // Optimize image for GPT Vision API - maximum speed optimization
     const optimized = await sharp(buffer)
-      .extract({ left, top, width: cropWidth, height: cropHeight }) // Apply center crop
-      .resize(800, 800, {  // Smaller size for faster GPT processing
+      .extract({ left, top, width: cropWidth, height: cropHeight }) // Apply aggressive center crop
+      .resize(600, 600, {  // Even smaller size for maximum speed
         fit: 'inside',
         withoutEnlargement: true
       })
-      .jpeg({ quality: 85 }) // Slightly higher quality for better accuracy
+      .jpeg({ quality: 80 }) // Balanced quality for speed
       .toBuffer();
 
     return optimized.toString('base64');
@@ -233,7 +233,7 @@ Rules:
           ]
         }
       ],
-      max_tokens: 500,        // Reduced for faster response
+      max_tokens: 300,        // Even more reduced for maximum speed
       temperature: 0,         // More deterministic, faster
       top_p: 0.1,            // More focused responses
       frequency_penalty: 0,   // No penalty for repetition
