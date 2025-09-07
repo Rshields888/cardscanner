@@ -1,278 +1,128 @@
-import vision from "@google-cloud/vision";
-import { okJSON, okEmpty, corsHeaders } from "../_cors";
-import { buildSearchQuery, buildAlternativeQueries } from "@/lib/query-builder";
+export const runtime = 'nodejs';
 
-export const runtime = "nodejs";
-export const maxDuration = 15;
+import vision from '@google-cloud/vision';
+import sharp from 'sharp';
 
-// Type definitions
-type Identity = {
-  player: string;
-  year: string;
-  set: string;
-  card_number: string;
-  variant: string;
-  grade: string;
-  confidence: number;
-  query: string;
-  alt_queries: string[];
+type AnalyzeReq = { imageDataUrl?: string };
+
+const corsHeaders = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'POST,OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
 };
 
-type HistoryEntry = {
-  date: string;
-  price: number;
-  title: string;
-  url: string;
-};
-
-type AnalyzeResponse = {
-  identity: Identity;
-  history: HistoryEntry[];
-};
-
-type AnalyzeError = {
-  error: string;
-};
-
-// Utility functions
-function ensureEnv(name: string): string {
-  const v = process.env[name];
-  if (!v) throw new Error(`${name} not set`);
-  return v;
+function fixPk(pk?: string) {
+  return (pk || '').replace(/\\r/g, '').replace(/\\n/g, '\n');
 }
 
-function normalizePrivateKey(pk: string|undefined): string {
-  return pk ? pk.replace(/\n/g, "\n").replace(/\\n/g, "\n") : "";
+const client = new vision.ImageAnnotatorClient({
+  projectId: process.env.GCP_PROJECT_ID,
+  credentials: {
+    client_email: process.env.GCP_CLIENT_EMAIL || '',
+    private_key: fixPk(process.env.GCP_PRIVATE_KEY),
+  },
+});
+
+function bad(body: any, status = 400) {
+  return new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
 }
 
-function validateImageSize(base64: string): void {
-  // Rough estimate: base64 is ~4/3 the size of binary data
-  // 4MB binary ≈ 5.3MB base64
-  const maxBase64Size = 5.3 * 1024 * 1024; // 5.3MB
-  if (base64.length > maxBase64Size) {
-    throw new Error("Image too large (max 4MB)");
-  }
-}
-
-async function processImageDataUrl(imageDataUrl: string): Promise<string> {
-  if (!imageDataUrl.startsWith('data:')) {
-    throw new Error("Invalid imageDataUrl format");
-  }
-  
-  const base64Match = imageDataUrl.match(/^data:[^;]+;base64,(.+)$/);
-  if (!base64Match) {
-    throw new Error("Invalid base64 data format");
-  }
-  
-  const base64 = base64Match[1];
-  validateImageSize(base64);
-  return base64;
-}
-
-async function processImageUrl(imageUrl: string): Promise<string> {
-  try {
-    const response = await fetch(imageUrl);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch image: ${response.status}`);
-    }
-    
-    const arrayBuffer = await response.arrayBuffer();
-    const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-    validateImageSize(base64);
-    return base64;
-  } catch (error) {
-    throw new Error(`Failed to process image URL: ${error instanceof Error ? error.message : 'Unknown error'}`);
-  }
-}
-
-// Reuse OCR logic from /api/scan
-function parseCardIdentity(text: string): Identity {
-  // Extract year
-  const yearMatch = text.match(/\b(19|20)\d{2}\b/);
-  const year = yearMatch ? yearMatch[0] : "";
-  
-  // Detect set names
-  const setPatterns = [
-    "Topps", "Bowman", "Panini", "Prizm", "Select", "Mosaic", "Donruss", 
-    "Chrome", "Allen & Ginter", "Optic", "Fleer", "Upper Deck", "Score"
-  ];
-  const set = setPatterns.find(setName => 
-    text.toLowerCase().includes(setName.toLowerCase())
-  ) || "";
-  
-  // Extract card number with normalization
-  const numberPatterns = [
-    /#\s*([A-Z]*\s*\d+[A-Z]?)/i,
-    /no\.\s*([A-Z]*\s*\d+[A-Z]?)/i,
-    /card\s*#?\s*([A-Z]*\s*\d+[A-Z]?)/i,
-    /([A-Z]{1,3}\s*\d+[A-Z]?)/i
-  ];
-  
-  let card_number = "";
-  for (const pattern of numberPatterns) {
-    const match = text.match(pattern);
-    if (match) {
-      card_number = match[1].trim();
-      break;
-    }
-  }
-  
-  // Extract player name (look for proper names in text)
-  const namePatterns = [
-    /([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})/g,
-    /([A-Z][a-z]+\s+[A-Z][a-z]+)/g
-  ];
-  
-  let player = "";
-  for (const pattern of namePatterns) {
-    const matches = text.match(pattern) || [];
-    // Find the longest name that looks like a person
-    const candidate = matches
-      .filter(name => name.split(' ').length >= 2)
-      .sort((a, b) => b.length - a.length)[0];
-    if (candidate) {
-      player = candidate;
-      break;
-    }
-  }
-  
-  // Detect variant
-  const variantPatterns = [
-    { pattern: /\b(rc|rookie)\b/i, variant: "RC" },
-    { pattern: /\b(refractor)\b/i, variant: "Refractor" },
-    { pattern: /\b(silver)\b/i, variant: "Silver" },
-    { pattern: /\b(holo|holofoil)\b/i, variant: "Holo" },
-    { pattern: /\b(base)\b/i, variant: "Base" }
-  ];
-  
-  const variant = variantPatterns.find(({ pattern }) => pattern.test(text))?.variant || "";
-  
-  // Default grade to Raw
-  const grade = "Raw";
-  
-  // Calculate confidence
-  let confidence = 0.55; // Base confidence
-  if (player && (set || card_number)) {
-    confidence = 0.75;
-  }
-  
-  // Build identity object
-  const identity = {
-    player,
-    year,
-    set,
-    card_number,
-    variant,
-    grade
-  };
-  
-  // Use shared utilities for query building
-  const query = buildSearchQuery(identity);
-  const alt_queries = buildAlternativeQueries(identity);
-  
-  return {
-    ...identity,
-    confidence,
-    query,
-    alt_queries
-  };
-}
-
-// CORS preflight handler
 export async function OPTIONS() {
-  return okEmpty();
+  return new Response(null, { status: 204, headers: corsHeaders });
 }
 
-// Main analyze endpoint
+async function maybeUpscale(base64: string): Promise<string> {
+  try {
+    const buf = Buffer.from(base64, 'base64');
+    const meta = await sharp(buf).metadata();
+    const h = meta.height ?? 0;
+    if (h < 800) {
+      const out = await sharp(buf)
+        .resize({ height: 1200, withoutEnlargement: false })
+        .jpeg({ quality: 92 })
+        .toBuffer();
+      return out.toString('base64');
+    }
+    return base64;
+  } catch {
+    return base64;
+  }
+}
+
+const SETS = ['Topps','Bowman','Panini','Prizm','Chrome','Select','Mosaic','Optic','Donruss','Score','Leaf','Allen & Ginter','Heritage','Stadium Club','Finest'];
+
+function parseIdentity(text: string, webTitles: string[], logos: string[]) {
+  const year = (text.match(/\b(19|20)\d{2}\b/) || [])[0] || '';
+  const cardNum = (text.match(/\b(?:No\.|No|#|№)\s*([A-Z0-9-]+)\b/i) || [])[1] || '';
+  const variant = /\bRC\b/.test(text) ? 'RC' : '';
+  const set = SETS.find(s => new RegExp(`\\b${s.replace(/[-/\\^$*+?.()|[\]{{}}]/g,'\\$&')}\\b`, 'i').test(text))
+              || logos[0] || '';
+
+  // Pull candidate names like "First Last", prefer the longest
+  const nameCandidates = (text.match(/\b[A-Z][a-z]+ [A-Z][a-z-']+\b/g) || [])
+    .filter(n => !SETS.includes(n.split(' ')[0])); // crude filter
+  const player = nameCandidates.sort((a,b) => b.length - a.length)[0]
+                || (webTitles[0]?.split(/[-–|•]/)[0].trim() || '');
+
+  const canonical = [player, set].filter(Boolean).join(' — ') || 'Unknown Card';
+  const mainQuery = [year, set, player, cardNum, variant].filter(Boolean).join(' ');
+  const alt1 = [set, player, cardNum, 'RC'].filter(Boolean).join(' ');
+  const alt2 = [year, set, player].filter(Boolean).join(' ');
+
+  return {
+    canonical_name: canonical,
+    player,
+    set,
+    year,
+    card_number: cardNum,
+    variant,
+    grading: null,
+    query: mainQuery || 'trading card',
+    alt_queries: [alt1, alt2].filter(Boolean),
+  };
+}
+
 export async function POST(req: Request) {
   try {
-    const body = await req.json();
-    const { imageDataUrl, imageUrl } = body;
-    
-    if (!imageDataUrl && !imageUrl) {
-      return new Response(
-        JSON.stringify({ error: "Either imageDataUrl or imageUrl must be provided" } as AnalyzeError),
-        { 
-          status: 400, 
-          headers: { 
-            "content-type": "application/json", 
-            ...corsHeaders() 
-          } 
-        }
-      );
+    const { imageDataUrl }: AnalyzeReq = await req.json();
+    if (!imageDataUrl || !/^data:image\/(jpe?g|png);base64,/.test(imageDataUrl)) {
+      return bad({ error: 'imageDataUrl (base64 data URL) required' }, 422);
     }
-    
-    // Process image
-    let imageBase64: string;
-    if (imageDataUrl) {
-      imageBase64 = await processImageDataUrl(imageDataUrl);
-    } else {
-      imageBase64 = await processImageUrl(imageUrl!);
-    }
-    
-    // Call Google Vision API
-    const client = new vision.ImageAnnotatorClient({
-      projectId: ensureEnv("GOOGLE_PROJECT_ID"),
-      credentials: { 
-        client_email: ensureEnv("GOOGLE_CLIENT_EMAIL"), 
-        private_key: normalizePrivateKey(process.env.GOOGLE_PRIVATE_KEY) 
-      }
+
+    let base64 = imageDataUrl.split(',')[1];
+    base64 = await maybeUpscale(base64);
+
+    const [annot] = await client.annotateImage({
+      image: { content: Buffer.from(base64, 'base64') },
+      features: [
+        { type: 'DOCUMENT_TEXT_DETECTION' },
+        { type: 'WEB_DETECTION' },
+        { type: 'LOGO_DETECTION' },
+      ],
+      imageContext: { languageHints: ['en'] },
     });
 
-    const image = { content: imageBase64 };
-    const [result] = await client.textDetection({ image });
-    const text = result?.fullTextAnnotation?.text || "";
-    
-    const identity = parseCardIdentity(text);
-    
-    // For now, return empty history (will be populated by /api/ebay/comps)
-    const history: HistoryEntry[] = [];
-    
-    const response: AnalyzeResponse = {
-      identity,
-      history
-    };
-    
-    return okJSON(response);
-    
-  } catch (error: any) {
-    console.error("Analyze error:", error);
-    
-    const errorResponse: AnalyzeError = {
-      error: error.message || "Analysis failed"
-    };
-    
-    const status = error.message?.includes("too large") ? 413 : 500;
-    
-    return new Response(
-      JSON.stringify(errorResponse),
-      { 
-        status, 
-        headers: { 
-          "content-type": "application/json", 
-          ...corsHeaders() 
-        } 
-      }
-    );
+    const ocrText = annot.fullTextAnnotation?.text || '';
+    const web = annot.webDetection;
+    const webTitles =
+      (web?.pagesWithMatchingImages || [])
+        .map(p => (p.pageTitle || '').trim())
+        .filter(Boolean)
+        .slice(0, 5);
+    const logos = (annot.logoAnnotations || []).map(l => l.description).filter(Boolean);
+
+    const identity = parseIdentity(ocrText, webTitles, logos);
+
+    return new Response(JSON.stringify({
+      identity: {
+        ...identity,
+        ocr_text_debug: ocrText.slice(0, 5000),   // keep for debugging in popup
+        web_titles_debug: webTitles,
+      },
+    }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+  } catch (e: any) {
+    return new Response(JSON.stringify({ error: String(e?.message || e) }), {
+      status: 500, headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+    });
   }
 }
-
-/*
-CURL Examples for testing:
-
-# Test with imageDataUrl (base64 data URL):
-curl -X POST https://your-app.vercel.app/api/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"imageDataUrl": "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD..."}'
-
-# Test with imageUrl (public image URL):
-curl -X POST https://your-app.vercel.app/api/analyze \
-  -H "Content-Type: application/json" \
-  -d '{"imageUrl": "https://example.com/card-image.jpg"}'
-
-# Test CORS preflight:
-curl -X OPTIONS https://your-app.vercel.app/api/analyze \
-  -H "Origin: chrome-extension://your-extension-id" \
-  -H "Access-Control-Request-Method: POST" \
-  -H "Access-Control-Request-Headers: Content-Type"
-*/
