@@ -1,0 +1,258 @@
+[1mdiff --git a/app/api/analyze/route.ts b/app/api/analyze/route.ts[m
+[1mindex f582b00..49320b8 100644[m
+[1m--- a/app/api/analyze/route.ts[m
+[1m+++ b/app/api/analyze/route.ts[m
+[36m@@ -1,59 +1,186 @@[m
+ export const runtime = 'nodejs';[m
+[32m+[m
+ import vision from '@google-cloud/vision';[m
+ import { fixPk, pickEnv, envDiag } from '@/lib/env';[m
+ [m
+[31m-const cors = {'Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'POST,OPTIONS','Access-Control-Allow-Headers':'Content-Type'};[m
+[31m-export async function OPTIONS(){ return new Response(null,{status:204,headers:cors}); }[m
+[31m-[m
+ type Body = { imageDataUrl?: string };[m
+ [m
+[31m-async function maybeUpscale(b64: string){ try{ const sharp=(await import('sharp')).default;[m
+[31m-  const buf=Buffer.from(b64,'base64'); const meta=await sharp(buf).metadata(); const h=meta.height??0;[m
+[31m-  if(h<800){ const out=await sharp(buf).resize({height:1200}).jpeg({quality:92}).toBuffer(); return out.toString('base64'); }[m
+[31m-  return b64; } catch { return b64; } }[m
+[31m-[m
+[31m-function parseIdentity(text:string, webTitles:string[], logos:string[]){[m
+[31m-  const SETS=['Topps','Bowman','Panini','Prizm','Chrome','Select','Mosaic','Optic','Donruss','Score','Leaf','Allen & Ginter','Heritage','Stadium Club','Finest'];[m
+[31m-  const year=(text.match(/\b(19|20)\d{2}\b/)||[])[0]||'';[m
+[31m-  const card=(text.match(/\b(?:No\.|No|#|№)\s*([A-Z0-9-]+)\b/i)||[])[1]||'';[m
+[31m-  const variant=/\bRC\b/.test(text)?'RC':'';[m
+[31m-  const set=SETS.find(s=>new RegExp(`\\b${s.replace(/[-/\\^$*+?.()|[\\]{{}}]/g,'\\$&')}\\b`,'i').test(text))||logos[0]||'';[m
+[31m-  const names=(text.match(/\b[A-Z][a-z]+ [A-Z][a-z-']+\b/g)||[]); const player=names.sort((a,b)=>b.length-a.length)[0]||(webTitles[0]?.split(/[-–|•]/)[0].trim()||'');[m
+[31m-  const canonical=[player,set].filter(Boolean).join(' — ')||'Unknown Card';[m
+[31m-  const query=[year,set,player,card,variant].filter(Boolean).join(' ')||'trading card';[m
+[31m-  const alt1=[set,player,card,'RC'].filter(Boolean).join(' '); const alt2=[year,set,player].filter(Boolean).join(' ');[m
+[31m-  return { canonical_name:canonical, player, set, year, card_number:card, variant, grading:null, query, alt_queries:[alt1,alt2].filter(Boolean) };[m
+[32m+[m[32mconst cors = {[m
+[32m+[m[32m  'Access-Control-Allow-Origin': '*',[m
+[32m+[m[32m  'Access-Control-Allow-Methods': 'POST,OPTIONS',[m
+[32m+[m[32m  'Access-Control-Allow-Headers': 'Content-Type',[m
+[32m+[m[32m};[m
+[32m+[m[32mexport async function OPTIONS() { return new Response(null, { status: 204, headers: cors }); }[m
+[32m+[m
+[32m+[m[32mconst SETS = [[m
+[32m+[m[32m  'Topps','Bowman','Panini','Prizm','Chrome','Optic','Donruss',[m
+[32m+[m[32m  'Select','Mosaic','Score','Leaf','Allen & Ginter','Heritage',[m
+[32m+[m[32m  'Stadium Club','Finest','Spectra','Contenders','Absolute'[m
+[32m+[m[32m];[m
+[32m+[m
+[32m+[m[32m// ---- image helpers (server-side ROI slicing with sharp)[m
+[32m+[m[32masync function decodeBase64(dataUrl: string) {[m
+[32m+[m[32m  if (!/^data:image\/(jpe?g|png);base64,/.test(dataUrl)) throw new Error('imageDataUrl must be base64 data URL');[m
+[32m+[m[32m  return Buffer.from(dataUrl.split(',')[1], 'base64');[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32masync function upscaleAndNormalize(buf: Buffer) {[m
+[32m+[m[32m  // Upscale small screenshots, normalize contrast, light sharpen[m
+[32m+[m[32m  const sharp = (await import('sharp')).default;[m
+[32m+[m[32m  const meta = await sharp(buf).metadata();[m
+[32m+[m[32m  let s = sharp(buf);[m
+[32m+[m[32m  if ((meta.height ?? 0) < 900) s = s.resize({ height: 1300, withoutEnlargement: false });[m
+[32m+[m[32m  s = s[m
+[32m+[m[32m    .normalize()           // improve contrast[m
+[32m+[m[32m    .gamma(1.1)            // mild gamma[m
+[32m+[m[32m    .sharpen(0.8)          // small sharpen[m
+[32m+[m[32m    .jpeg({ quality: 92 });[m
+[32m+[m[32m  return await s.toBuffer();[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32mtype Rect = { left: number; top: number; width: number; height: number; };[m
+[32m+[m
+[32m+[m[32mfunction fracRect(meta: { width?: number; height?: number; }, f: { x:number;y:number;w:number;h:number; }): Rect {[m
+[32m+[m[32m  const W = meta.width ?? 0, H = meta.height ?? 0;[m
+[32m+[m[32m  return {[m
+[32m+[m[32m    left: Math.max(0, Math.round(W * f.x)),[m
+[32m+[m[32m    top:  Math.max(0, Math.round(H * f.y)),[m
+[32m+[m[32m    width: Math.max(1, Math.round(W * f.w)),[m
+[32m+[m[32m    height: Math.max(1, Math.round(H * f.h)),[m
+[32m+[m[32m  };[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32masync function extractROIs(buf: Buffer) {[m
+[32m+[m[32m  const sharp = (await import('sharp')).default;[m
+[32m+[m[32m  const meta = await sharp(buf).metadata();[m
+[32m+[m
+[32m+[m[32m  // Full (tight crop already), Nameplate (bottom 30%), Logo band (top ~20% center)[m
+[32m+[m[32m  const full: Rect = { left: 0, top: 0, width: meta.width!, height: meta.height! };[m
+[32m+[m[32m  const nameplate = fracRect(meta, { x: 0.06, y: 0.68, w: 0.88, h: 0.30 }); // bottom band[m
+[32m+[m[32m  const logoBand  = fracRect(meta, { x: 0.08, y: 0.02, w: 0.84, h: 0.22 }); // top logos/text[m
+[32m+[m
+[32m+[m[32m  async function cut(r: Rect) {[m
+[32m+[m[32m    const b = await sharp(buf).extract(r).resize({ height: Math.min(1100, Math.max(700, r.height)) }).jpeg({ quality: 94 }).toBuffer();[m
+[32m+[m[32m    return b;[m
+[32m+[m[32m  }[m
+[32m+[m
+[32m+[m[32m  return {[m
+[32m+[m[32m    full: await cut(full),[m
+[32m+[m[32m    nameplate: await cut(nameplate),[m
+[32m+[m[32m    logo: await cut(logoBand),[m
+[32m+[m[32m  };[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m// ---- Vision client + annotate[m
+[32m+[m[32mfunction newClient() {[m
+[32m+[m[32m  const diag = envDiag();[m
+[32m+[m[32m  if (!diag.ok) throw new Error('MISSING_ENV: ' + diag.missing.join(','));[m
+[32m+[m[32m  return new vision.ImageAnnotatorClient({[m
+[32m+[m[32m    projectId: pickEnv('GOOGLE_PROJECT_ID','GCP_PROJECT_ID'),[m
+[32m+[m[32m    credentials: {[m
+[32m+[m[32m      client_email: pickEnv('GOOGLE_CLIENT_EMAIL','GCP_CLIENT_EMAIL') || '',[m
+[32m+[m[32m      private_key: fixPk(pickEnv('GOOGLE_PRIVATE_KEY','GCP_PRIVATE_KEY')),[m
+[32m+[m[32m    },[m
+[32m+[m[32m  });[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32masync function visionAnnotate(client: any, buf: Buffer) {[m
+[32m+[m[32m  const [annot] = await client.annotateImage({[m
+[32m+[m[32m    image: { content: buf },[m
+[32m+[m[32m    features: [[m
+[32m+[m[32m      { type: 'DOCUMENT_TEXT_DETECTION' },[m
+[32m+[m[32m      { type: 'WEB_DETECTION' },[m
+[32m+[m[32m      { type: 'LOGO_DETECTION' },[m
+[32m+[m[32m    ],[m
+[32m+[m[32m    imageContext: { languageHints: ['en'] },[m
+[32m+[m[32m  });[m
+[32m+[m[32m  return annot;[m
+[32m+[m[32m}[m
+[32m+[m
+[32m+[m[32m// ---- parsing[m
+[32m+[m[32mfunction parseIdentity(text: string, webTitles: string[], logos: string[]) {[m
+[32m+[m[32m  const year = (text.match(/\b(19|20)\d{2}\b/) || [])[0] || '';[m
+[32m+[m[32m  const cardNum = (text.match(/\b(?:No\.|No|#|№)\s*([A-Z0-9-]+)\b/i) || [])[1] || '';[m
+[32m+[m[32m  const variant = /\bRC\b/.test(text) ? 'RC' : '';[m
+[32m+[m[32m  const set = SETS.find(s => new RegExp(`\\b${s.replace(/[-/\\^$*+?.()|[\\]{}]/g,'\\$&')}\\b`, 'i').test(text))[m
+[32m+[m[32m             || (logos[0] || '');[m
+[32m+[m
+[32m+[m[32m  // Candidate names like "First Last" or "First Last-Suffix"[m
+[32m+[m[32m  const nameCandidates = (text.match(/\b[A-Z][a-z]+ [A-Z][a-z-']+\b/g) || [])[m
+[32m+[m[32m    .filter(n => !SETS.includes(n.split(' ')[0]));[m
+[32m+[m[32m  const player =[m
+[32m+[m[32m    nameCandidates.sort((a,b)=>b.length-a.length)[0] ||[m
+[32m+[m[32m    (webTitles[0]?.split(/[-–|•]/)[0].trim() || '');[m
+[32m+[m
+[32m+[m[32m  const canonical = [player, set].filter(Boolean).join(' — ') || 'Unknown Card';[m
+[32m+[m[32m  const query = [year, set, player, cardNum, variant].filter(Boolean).join(' ') || 'trading card';[m
+[32m+[m[32m  const alt1  = [set, player, cardNum, 'RC'].filter(Boolean).join(' ');[m
+[32m+[m[32m  const alt2  = [year, set, player].filter(Boolean).join(' ');[m
+[32m+[m
+[32m+[m[32m  return {[m
+[32m+[m[32m    canonical_name: canonical,[m
+[32m+[m[32m    player, set, year,[m
+[32m+[m[32m    card_number: cardNum,[m
+[32m+[m[32m    variant,[m
+[32m+[m[32m    grading: null,[m
+[32m+[m[32m    query,[m
+[32m+[m[32m    alt_queries: [alt1, alt2].filter(Boolean),[m
+[32m+[m[32m  };[m
+ }[m
+ [m
+[31m-export async function POST(req: Request){[m
+[31m-  try{[m
+[31m-    const d=envDiag(); if(!d.ok) return new Response(JSON.stringify({error:'MISSING_ENV', detail:d.missing}),{status:500,headers:{...cors,'Content-Type':'application/json'}});[m
+[32m+[m[32m// ---- route[m
+[32m+[m[32mexport async function POST(req: Request) {[m
+[32m+[m[32m  try {[m
+     const { imageDataUrl }: Body = await req.json();[m
+[31m-    if(!imageDataUrl || !/^data:image\/(jpe?g|png);base64,/.test(imageDataUrl)) return new Response(JSON.stringify({error:'imageDataUrl required'}),{status:422,headers:{...cors,'Content-Type':'application/json'}});[m
+[31m-    let b64=imageDataUrl.split(',')[1]; b64=await maybeUpscale(b64);[m
+[31m-[m
+[31m-    const client = new vision.ImageAnnotatorClient({[m
+[31m-      projectId: pickEnv('GOOGLE_PROJECT_ID','GCP_PROJECT_ID'),[m
+[31m-      credentials: {[m
+[31m-        client_email: pickEnv('GOOGLE_CLIENT_EMAIL','GCP_CLIENT_EMAIL'),[m
+[31m-        private_key: fixPk(pickEnv('GOOGLE_PRIVATE_KEY','GCP_PRIVATE_KEY')),[m
+[31m-      },[m
+[31m-    });[m
+[31m-[m
+[31m-    const [annot] = await client.annotateImage({[m
+[31m-      image: { content: Buffer.from(b64,'base64') },[m
+[31m-      features: [{type:'DOCUMENT_TEXT_DETECTION'},{type:'WEB_DETECTION'},{type:'LOGO_DETECTION'}],[m
+[31m-      imageContext: { languageHints:['en'] },[m
+[31m-    });[m
+[31m-[m
+[31m-    const text = annot.fullTextAnnotation?.text || '';[m
+[31m-    const webTitles = (annot.webDetection?.pagesWithMatchingImages||[]).map(p=> (p.pageTitle||'').trim()).filter(Boolean).slice(0,5);[m
+[31m-    const logos = (annot.logoAnnotations||[]).map(l=> l.description).filter(Boolean);[m
+[31m-    const identity = parseIdentity(text, webTitles, logos);[m
+[31m-[m
+[31m-    return new Response(JSON.stringify({ identity: { ...identity, ocr_text_debug: text.slice(0,5000), web_titles_debug: webTitles } }), { status:200, headers:{...cors,'Content-Type':'application/json'} });[m
+[31m-  } catch(e:any){[m
+[31m-    console.error('[analyze] fatal', e?.message||e); [m
+[31m-   return new Response(JSON.stringify({ error:String(e?.message||e) }), { status:500, headers:{...cors,'Content-Type':'application/json'} });[m
+[32m+[m[32m    if (!imageDataUrl) {[m
+[32m+[m[32m      return new Response(JSON.stringify({ error: 'imageDataUrl required' }), { status: 422, headers: { ...cors, 'Content-Type': 'application/json' } });[m
+[32m+[m[32m    }[m
+[32m+[m
+[32m+[m[32m    // decode + preprocess + slice ROIs[m
+[32m+[m[32m    let buf = await decodeBase64(imageDataUrl);[m
+[32m+[m[32m    buf = await upscaleAndNormalize(buf);[m
+[32m+[m[32m    const rois = await extractROIs(buf);[m
+[32m+[m
+[32m+[m[32m    // annotate all three[m
+[32m+[m[32m    const client = newClient();[m
+[32m+[m[32m    const [aFull, aName, aLogo] = await Promise.all([[m
+[32m+[m[32m      visionAnnotate(client, rois.full),[m
+[32m+[m[32m      visionAnnotate(client, rois.nameplate),[m
+[32m+[m[32m      visionAnnotate(client, rois.logo),[m
+[32m+[m[32m    ]);[m
+[32m+[m
+[32m+[m[32m    const texts = [[m
+[32m+[m[32m      aFull.fullTextAnnotation?.text || '',[m
+[32m+[m[32m      aName.fullTextAnnotation?.text || '',[m
+[32m+[m[32m      aLogo.fullTextAnnotation?.text || '',[m
+[32m+[m[32m    ].join('\n');[m
+[32m+[m
+[32m+[m[32m    // merge signals[m
+[32m+[m[32m    const webTitles = [[m
+[32m+[m[32m      ...(aFull.webDetection?.pagesWithMatchingImages || []),[m
+[32m+[m[32m      ...(aName.webDetection?.pagesWithMatchingImages || []),[m
+[32m+[m[32m      ...(aLogo.webDetection?.pagesWithMatchingImages || []),[m
+[32m+[m[32m    ].map(p => (p.pageTitle || '').trim()).filter(Boolean).slice(0, 5);[m
+[32m+[m
+[32m+[m[32m    const logos = [[m
+[32m+[m[32m      ...(aFull.logoAnnotations || []),[m
+[32m+[m[32m      ...(aName.logoAnnotations || []),[m
+[32m+[m[32m      ...(aLogo.logoAnnotations || []),[m
+[32m+[m[32m    ].map(l => l.description).filter(Boolean);[m
+[32m+[m
+[32m+[m[32m    const identity = parseIdentity(texts, webTitles, logos);[m
+[32m+[m
+[32m+[m[32m    return new Response(JSON.stringify({[m
+[32m+[m[32m      identity: {[m
+[32m+[m[32m        ...identity,[m
+[32m+[m[32m        ocr_text_debug: texts.slice(0, 6000),[m
+[32m+[m[32m        web_titles_debug: webTitles,[m
+[32m+[m[32m        logos_debug: logos.slice(0, 5),[m
+[32m+[m[32m      }[m
+[32m+[m[32m    }), { status: 200, headers: { ...cors, 'Content-Type': 'application/json' } });[m
+[32m+[m
+[32m+[m[32m  } catch (e: any) {[m
+[32m+[m[32m    console.error('[analyze] fatal', e?.message || e);[m
+[32m+[m[32m    return new Response(JSON.stringify({ error: String(e?.message || e) }), { status: 500, headers: { ...cors, 'Content-Type': 'application/json' } });[m
+   }[m
+ }[m
+\ No newline at end of file[m
+[1mdiff --git a/lib/env.ts b/lib/env.ts[m
+[1mindex 1d4d406..8d5d7c4 100644[m
+[1m--- a/lib/env.ts[m
+[1m+++ b/lib/env.ts[m
+[36m@@ -12,11 +12,6 @@[m [mexport function envDiag() {[m
+     ['privateKey', ['GOOGLE_PRIVATE_KEY','GCP_PRIVATE_KEY']],[m
+   ] as const;[m
+   const missing: string[] = [];[m
+[31m-  const out: Record<string,string> = {};[m
+[31m-  for (const [label, opts] of fields) {[m
+[31m-    const v = pickEnv(...opts);[m
+[31m-    if (!v) missing.push(opts.join('|'));[m
+[31m-    out[label] = v ? '[set]' : '';[m
+[31m-  }[m
+[31m-  return { ok: missing.length===0, missing, map: out };[m
+[32m+[m[32m  for (const [, opts] of fields) if (!pickEnv(...opts)) missing.push(opts.join('|'));[m
+[32m+[m[32m  return { ok: missing.length===0, missing };[m
+ }[m

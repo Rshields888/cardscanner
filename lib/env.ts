@@ -12,11 +12,6 @@ export function envDiag() {
     ['privateKey', ['GOOGLE_PRIVATE_KEY','GCP_PRIVATE_KEY']],
   ] as const;
   const missing: string[] = [];
-  const out: Record<string,string> = {};
-  for (const [label, opts] of fields) {
-    const v = pickEnv(...opts);
-    if (!v) missing.push(opts.join('|'));
-    out[label] = v ? '[set]' : '';
-  }
-  return { ok: missing.length===0, missing, map: out };
+  for (const [, opts] of fields) if (!pickEnv(...opts)) missing.push(opts.join('|'));
+  return { ok: missing.length===0, missing };
 }
