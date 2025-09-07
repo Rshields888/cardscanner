@@ -1,4 +1,4 @@
-export const runtime = 'edge';
+export const runtime = 'nodejs';
 
 import OpenAI from 'openai';
 import { z } from 'zod';
@@ -36,12 +36,51 @@ export async function OPTIONS() {
   });
 }
 
-// Helper to convert data URL to base64
-function dataUrlToBase64(dataUrl: string): string {
+// Helper to convert data URL to base64 and optimize image
+async function optimizeImageForGPT(dataUrl: string): Promise<string> {
   if (!/^data:image\/(png|jpe?g);base64,/.test(dataUrl)) {
     throw new Error('imageDataUrl must be a valid base64 data URL');
   }
-  return dataUrl.split(',')[1];
+
+  try {
+    // Import sharp for image optimization
+    const sharp = (await import('sharp')).default;
+    const base64Data = dataUrl.split(',')[1];
+    const buffer = Buffer.from(base64Data, 'base64');
+
+    // Get image metadata to calculate crop area
+    const metadata = await sharp(buffer).metadata();
+    const originalWidth = metadata.width;
+    const originalHeight = metadata.height;
+
+    if (!originalWidth || !originalHeight) {
+      throw new Error('Could not get image dimensions for optimization');
+    }
+
+    // Calculate crop area: remove 5% from each side (total 10% reduction in width/height)
+    // This focuses on the central 90% of the image, assuming the card is generally there.
+    const cropPercentage = 0.9; // Keep 90% of the original image
+    const cropWidth = Math.floor(originalWidth * cropPercentage);
+    const cropHeight = Math.floor(originalHeight * cropPercentage);
+    const left = Math.floor((originalWidth - cropWidth) / 2);
+    const top = Math.floor((originalHeight - cropHeight) / 2);
+
+    // Optimize image for GPT Vision API - smaller size for faster processing
+    const optimized = await sharp(buffer)
+      .extract({ left, top, width: cropWidth, height: cropHeight }) // Apply center crop
+      .resize(800, 800, {  // Smaller size for faster GPT processing
+        fit: 'inside',
+        withoutEnlargement: true
+      })
+      .jpeg({ quality: 85 }) // Slightly higher quality for better accuracy
+      .toBuffer();
+
+    return optimized.toString('base64');
+  } catch (error) {
+    console.error('Error optimizing image for GPT:', error);
+    // Fallback to original base64 if optimization fails
+    return dataUrl.split(',')[1];
+  }
 }
 
 // Helper to validate and coerce GPT response
@@ -139,7 +178,8 @@ export async function POST(req: Request) {
     // Prepare image for OpenAI Vision
     let imageContent: string;
     if (imageDataUrl) {
-      imageContent = dataUrlToBase64(imageDataUrl);
+      // Optimize and crop the image for better GPT performance
+      imageContent = await optimizeImageForGPT(imageDataUrl);
     } else if (imageUrl) {
       // For imageUrl, we'll pass it directly to OpenAI
       imageContent = imageUrl;
@@ -173,7 +213,7 @@ Rules:
 - Include 2-3 alt_queries for search variations
 - Be precise and conservative`;
 
-    // Make the OpenAI Vision API call
+    // Make the OpenAI Vision API call with speed optimizations
     const response = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       messages: [
@@ -193,8 +233,11 @@ Rules:
           ]
         }
       ],
-      max_tokens: 1000,
-      temperature: 0.1
+      max_tokens: 500,        // Reduced for faster response
+      temperature: 0,         // More deterministic, faster
+      top_p: 0.1,            // More focused responses
+      frequency_penalty: 0,   // No penalty for repetition
+      presence_penalty: 0     // No penalty for new topics
     });
 
     const gptResponse = response.choices[0]?.message?.content;
