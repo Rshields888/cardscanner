@@ -228,12 +228,12 @@ export async function POST(req: Request) {
     // For now, return empty history (will be populated by /api/ebay/comps)
     const history: HistoryEntry[] = [];
     
-    const result: AnalyzeResponse = {
+    const response: AnalyzeResponse = {
       identity,
       history
     };
     
-    return okJSON(result);
+    return okJSON(response);
     
   } catch (error: any) {
     console.error("Analyze error:", error);
