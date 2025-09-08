@@ -1,5 +1,12 @@
-export const runtime = 'nodejs';
-import { envDiag } from '@/lib/env';
-const cors = {'Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET,OPTIONS','Access-Control-Allow-Headers':'Content-Type'};
-export async function OPTIONS(){ return new Response(null,{status:204,headers:cors}); }
-export async function GET(){ const d=envDiag(); return new Response(JSON.stringify({ok:true, env:d}),{status:200,headers:{...cors,'Content-Type':'application/json'}}); }
+import { NextResponse } from "next/server";
+export const runtime = "edge";
+export async function GET() {
+  return NextResponse.json({
+    ok: true,
+    endpoints: [
+      "/api/health/ebay/env",
+      "/api/health/ebay/token",
+      "/api/health/ebay?q=2018%20Panini%20Prizm%20Luka%20Doncic%20%23280&limit=5"
+    ]
+  });
+}
