@@ -1,5 +1,5 @@
 import vision from "@google-cloud/vision";
-import { findCompletedComps } from "@/lib/ebay";
+import { searchActive } from "@/lib/ebay";
 import { cache } from "@/lib/cache";
 import { okJSON, okEmpty, corsHeaders } from "../_cors";
 export const runtime = "nodejs";
@@ -172,7 +172,7 @@ export async function POST(req: Request){
       if (isNewOcrText) {
         try {
           // Only call eBay API for truly new OCR text from Chrome extensions
-          comps = await findCompletedComps(query, ensureEnv("EBAY_APP_ID"), true);
+          comps = await searchActive({ q: query, limit: 30 });
           // Mark this OCR text as processed
           cache.setOcrText(text);
         } catch (error: any) {

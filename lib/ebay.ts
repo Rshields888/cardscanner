@@ -1,141 +1,103 @@
-import { ebayRateLimiter } from './rate-limiter';
-import { cache } from './cache';
+export type ActiveItem = {
+  price: number | null;
+  shipping: number | null;
+  date: string | null;   // active listing -> null
+  url: string | null;    // prefer affiliate URL
+  title: string | null;
+  image: string | null;
+  legacyItemId?: string | null;
+};
 
-export type CompItem = { title: string; price: number; currency: string; url?: string; ended?: string };
-export type CompsOut = { lastSold?: number; avg?: number; floor?: number; items: CompItem[] };
+let tokenMemo: { accessToken: string; expAt: number } | null = null;
 
-class EbayApiError extends Error {
-  constructor(message: string, public status?: number, public retryAfter?: number) {
-    super(message);
-    this.name = 'EbayApiError';
-  }
+function getClientId() {
+  // allow legacy EBAY_APP_ID fallback
+  return process.env.EBAY_CLIENT_ID || process.env.EBAY_APP_ID || "";
 }
 
-async function makeEbayRequest(url: string, maxRetries: number = 3): Promise<any> {
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      // Wait for rate limit slot
-      await ebayRateLimiter.waitForSlot();
-      
-      const response = await fetch(url);
-      
-      if (response.status === 429) {
-        // Rate limit exceeded
-        const retryAfter = response.headers.get('Retry-After');
-        const retryMs = retryAfter ? parseInt(retryAfter) * 1000 : 60000; // Default 1 minute
-        
-        if (attempt < maxRetries) {
-          console.log(`Rate limited, retrying after ${retryMs}ms (attempt ${attempt}/${maxRetries})`);
-          await new Promise(resolve => setTimeout(resolve, retryMs));
-          continue;
-        } else {
-          throw new EbayApiError('Rate limit exceeded', 429, retryMs);
-        }
-      }
-      
-      if (!response.ok) {
-        throw new EbayApiError(`eBay API error: ${response.status}`, response.status);
-      }
-      
-      const data = await response.json();
-      
-      // Check for eBay API errors in response
-      if (data.errorMessage) {
-        const error = data.errorMessage[0]?.error?.[0];
-        if (error?.errorId?.[0] === '10001') {
-          // Rate limit error from eBay
-          const retryMs = 60000; // 1 minute
-          if (attempt < maxRetries) {
-            console.log(`eBay rate limit error, retrying after ${retryMs}ms (attempt ${attempt}/${maxRetries})`);
-            await new Promise(resolve => setTimeout(resolve, retryMs));
-            continue;
-          } else {
-            throw new EbayApiError('eBay rate limit exceeded', 429, retryMs);
-          }
-        }
-        throw new EbayApiError(`eBay API error: ${error?.message?.[0] || 'Unknown error'}`);
-      }
-      
-      return data;
-    } catch (error) {
-      if (error instanceof EbayApiError) {
-        throw error;
-      }
-      
-      if (attempt === maxRetries) {
-        throw new EbayApiError(`Network error: ${error instanceof Error ? error.message : 'Unknown error'}`);
-      }
-      
-      // Wait before retry
-      await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-    }
-  }
+function b64(input: string) {
+  // Edge/runtime-safe base64
+  return btoa(unescape(encodeURIComponent(input)));
 }
 
-export async function findCompletedComps(keywords: string, appId: string, isNewOcrText: boolean = false): Promise<CompsOut> {
-  // Create cache key
-  const cacheKey = `ebay_comps_${keywords.toLowerCase().replace(/\s+/g, '_')}`;
-  
-  // Check cache first - only return cached if it's not new OCR text
-  if (!isNewOcrText) {
-    const cached = cache.get<CompsOut>(cacheKey);
-    if (cached) {
-      console.log('Returning cached eBay data for:', keywords);
-      return cached;
-    }
-  }
-  
-  // Only make API call if it's new OCR text
-  if (!isNewOcrText) {
-    throw new EbayApiError('eBay API calls are only allowed for new OCR text to preserve rate limits');
-  }
-  
-  const params = new URLSearchParams({
-    "OPERATION-NAME": "findCompletedItems",
-    "SERVICE-VERSION": "1.13.0",
-    "SECURITY-APPNAME": appId,
-    "RESPONSE-DATA-FORMAT": "JSON",
-    "REST-PAYLOAD": "true",
-    "keywords": keywords,
-    "paginationInput.entriesPerPage": "50",
-    "itemFilter(0).name": "SoldItemsOnly",
-    "itemFilter(0).value": "true",
-    "outputSelector(0)": "SellerInfo",
-    "sortOrder": "EndTimeSoonest"
+function median(nums: number[]) {
+  if (!nums.length) return null as number | null;
+  const a = [...nums].sort((x, y) => x - y);
+  const mid = Math.floor(a.length / 2);
+  return a.length % 2 ? a[mid] : (a[mid - 1] + a[mid]) / 2;
+}
+
+export async function getAppToken() {
+  const now = Date.now();
+  if (tokenMemo && now < tokenMemo.expAt - 60_000) return tokenMemo.accessToken;
+
+  const id = getClientId();
+  const secret = process.env.EBAY_CLIENT_SECRET || "";
+  if (!id || !secret) throw new Error("Missing EBAY_CLIENT_ID/EBAY_APP_ID or EBAY_CLIENT_SECRET");
+
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    scope: "https://api.ebay.com/oauth/api_scope", // Browse search scope
   });
-  
-  const url = `https://svcs.ebay.com/services/search/FindingService/v1?${params.toString()}`;
-  
-  try {
-    const j = await makeEbayRequest(url);
-    const sr = j?.findCompletedItemsResponse?.[0]?.searchResult?.[0];
-    const items: CompItem[] = (sr?.item || []).map((it: any) => {
-      const selling = it?.sellingStatus?.[0];
-      const pObj = selling?.currentPrice?.[0];
-      return {
-        title: it?.title?.[0],
-        price: Number(pObj?.__value__) || 0,
-        currency: pObj?.["@currencyId"] || "USD",
-        url: it?.viewItemURL?.[0],
-        ended: it?.listingInfo?.[0]?.endTime?.[0],
-      };
-    }).filter((x: CompItem) => x.price > 0);
-    
-    const prices = items.map(x => x.price);
-    const lastSold = prices[0];
-    const avg = prices.length ? prices.reduce((a,b)=>a+b,0)/prices.length : undefined;
-    const floor = prices.length ? Math.min(...prices) : undefined;
-    
-    const result = { lastSold, avg, floor, items };
-    
-    // Cache the result for 10 minutes
-    cache.set(cacheKey, result, 10 * 60 * 1000);
-    
-    return result;
-  } catch (error) {
-    if (error instanceof EbayApiError) {
-      throw error;
-    }
-    throw new EbayApiError(`Failed to fetch eBay data: ${error instanceof Error ? error.message : 'Unknown error'}`);
-  }
+
+  const res = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${b64(`${id}:${secret}`)}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body,
+  });
+  if (!res.ok) throw new Error(`eBay token error: ${res.status} ${await res.text()}`);
+
+  const json = (await res.json()) as { access_token: string; expires_in: number };
+  tokenMemo = { accessToken: json.access_token, expAt: Date.now() + json.expires_in * 1000 };
+  return tokenMemo.accessToken;
+}
+
+export async function searchActive(opts: { q: string; limit?: number; categoryId?: string }) {
+  const token = await getAppToken();
+  const marketplace = process.env.EBAY_MARKETPLACE || "EBAY_US";
+  const limit = String(opts.limit ?? 30);
+  const categoryId = opts.categoryId || process.env.EBAY_CATEGORY_ID || "";
+
+  const url = new URL("https://api.ebay.com/buy/browse/v1/item_summary/search");
+  url.searchParams.set("q", opts.q);
+  url.searchParams.set("limit", limit);
+  url.searchParams.set("fieldgroups", "FULL");
+  if (categoryId) url.searchParams.set("category_ids", categoryId);
+
+  const ctx: string[] = [];
+  const camp = process.env.EBAY_AFFILIATE_CAMPAIGN_ID;
+  const ref  = process.env.EBAY_AFFILIATE_REFERENCE_ID;
+  if (camp) ctx.push(`affiliateCampaignId=${camp}`);
+  if (ref)  ctx.push(`affiliateReferenceId=${ref}`);
+  // Optional: improves shipping estimates
+  ctx.push("contextualLocation=country=US,zip=10001");
+
+  const r = await fetch(url.toString(), {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "X-EBAY-C-MARKETPLACE-ID": marketplace,
+      "X-EBAY-C-ENDUSERCTX": ctx.join(";"),
+    },
+    cache: "no-store",
+  });
+  if (!r.ok) throw new Error(`Browse error: ${r.status} ${await r.text()}`);
+
+  const data = (await r.json()) as any;
+  const items: ActiveItem[] = (data.itemSummaries ?? []).map((it: any) => ({
+    price: it?.price?.value ? Number(it.price.value) : null,
+    shipping: it?.shippingOptions?.[0]?.shippingCost?.value
+      ? Number(it.shippingOptions[0].shippingCost.value)
+      : 0,
+    date: null,
+    url: it?.itemAffiliateWebUrl || it?.itemWebUrl || null,
+    title: it?.title ?? null,
+    image: it?.image?.imageUrl || it?.thumbnailImages?.[0]?.imageUrl || null,
+    legacyItemId: it?.legacyItemId ?? null,
+  }));
+
+  const totals = items.map(i => (i.price ?? 0) + (i.shipping ?? 0)).filter(v => v > 0);
+  return { history: items, stats: { median: median(totals) } };
 }
