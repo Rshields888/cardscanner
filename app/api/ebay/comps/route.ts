@@ -11,7 +11,7 @@ export async function POST(req: Request) {
 
     const identity = body?.identity ?? null;
     const limit = Number(body?.limit ?? 30);
-    const categoryId = body?.categoryId || process.env.EBAY_CATEGORY_ID || "261328";
+    const categoryId = body?.categoryId || process.env.EBAY_CATEGORY_ID || "";
 
     let query: string = body?.query || (identity ? buildQuery(identity) : "");
     const alts: string[] = body?.alt_queries || (identity ? altQueries(identity) : []);

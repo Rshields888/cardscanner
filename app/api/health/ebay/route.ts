@@ -6,7 +6,7 @@ export async function GET(req: Request) {
     const { searchParams } = new URL(req.url);
     const q = searchParams.get("q") || "2024 Panini Prizm Caitlin Clark #22";
     const limit = Number(searchParams.get("limit") || 5);
-    const categoryId = searchParams.get("categoryId") || process.env.EBAY_CATEGORY_ID || "261328";
+    const categoryId = searchParams.get("categoryId") || process.env.EBAY_CATEGORY_ID || "";
     const result = await searchActive({ q, limit, categoryId });
     return NextResponse.json({ ok: true, q, count: result.history?.length || 0, median: result.stats?.median ?? null, sample: result.history?.slice(0,2) || [] });
   } catch (e: any) {
