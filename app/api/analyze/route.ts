@@ -65,13 +65,12 @@ async function optimizeImageForGPT(dataUrl: string): Promise<string> {
       throw new Error('Could not get image dimensions for optimization');
     }
 
-    // Calculate aggressive crop area: remove 25% from each side (total 50% reduction)
-    // This focuses on the central 50% of the image, perfect for centered cards
-    const cropPercentage = 0.5; // Keep 50% of the original image (center crop)
-    const cropWidth = Math.floor(originalWidth * cropPercentage);
-    const cropHeight = Math.floor(originalHeight * cropPercentage);
+    // Calculate crop area with more space on top to avoid cutting off card details
+    // Keep 50% width but 60% height to preserve top of card
+    const cropWidth = Math.floor(originalWidth * 0.5);  // 50% width
+    const cropHeight = Math.floor(originalHeight * 0.6); // 60% height (more generous on top)
     const left = Math.floor((originalWidth - cropWidth) / 2);
-    const top = Math.floor((originalHeight - cropHeight) / 2);
+    const top = Math.floor((originalHeight - cropHeight) * 0.3); // Start higher up (30% from top instead of center)
 
     // Optimized image processing for 5s target with good quality
     const optimized = await sharp(buffer)
@@ -217,13 +216,15 @@ export async function POST(req: Request) {
   "company": string or null,
   "is_rookie": boolean or null,
   "parallel": string or null,
+  "card_type": string or null,
   "grade": string or null,
   "canonical_name": string or null,
   "alt_queries": []
 }
 
 CRITICAL: Check for rookie indicators (RC, Rookie, etc.). Identify parallel/variant (Prizm, Chrome, Refractor, etc.). 
-Look for grading (PSA, BGS, SGC labels). Set grade="Raw" if ungraded.
+Look for grading (PSA, BGS, SGC labels). Check for autographs (Auto, Signature, etc.) and patches (RPA, Patch, Jersey, etc.).
+Set grade="Raw" if ungraded. Set card_type to "Auto" if autographed, "RPA" if patch card, "Base" if neither.
 Return JSON only.`;
 
     // Make the OpenAI Vision API call with ultra-speed optimizations
