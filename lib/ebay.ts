@@ -17,47 +17,57 @@ function getClientSecret() {
   return (process.env.EBAY_CLIENT_SECRET || "").trim();
 }
 
-// Edge/Node-safe base64
-function base64(input: string) {
-  try { if (typeof Buffer !== "undefined") return Buffer.from(input, "utf-8").toString("base64"); } catch {}
+// Edge/Node-safe base64 for Edge runtime
+function b64(input: string) {
+  try {
+    if (typeof Buffer !== "undefined") return Buffer.from(input, "utf-8").toString("base64");
+  } catch {}
   const bytes = new TextEncoder().encode(input);
-  let bin = ""; for (let i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   // @ts-ignore
   return btoa(bin);
 }
+
 function median(nums: number[]) {
   if (!nums.length) return null as number | null;
-  const a = [...nums].sort((x,y)=>x-y); const m = Math.floor(a.length/2);
-  return a.length % 2 ? a[m] : (a[m-1]+a[m])/2;
+  const a = [...nums].sort((x, y) => x - y);
+  const m = Math.floor(a.length / 2);
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
 }
 
-export async function getAppToken() {
+/** Fetch & cache an Application token (Client Credentials grant). */
+export async function getAppToken(): Promise<string> {
   const now = Date.now();
   if (tokenMemo && now < tokenMemo.expAt - 60_000) return tokenMemo.accessToken;
 
-  const id = getClientId(); const secret = getClientSecret();
+  const id = getClientId();
+  const secret = getClientSecret();
   if (!id || !secret) throw new Error("Missing EBAY_CLIENT_ID/EBAY_APP_ID or EBAY_CLIENT_SECRET");
 
-  // Use precise Browse scope; space-separated allows multiple if needed
+  // Scope specific to Browse (works for item_summary/search)
   const scope = "https://api.ebay.com/oauth/api_scope/buy.browse.readonly";
-  const body = new URLSearchParams({ grant_type: "client_credentials", scope });
 
   const res = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
     method: "POST",
-    headers: { Authorization: `Basic ${base64(`${id}:${secret}`)}`, "Content-Type": "application/x-www-form-urlencoded" },
-    body,
+    headers: {
+      Authorization: `Basic ${b64(`${id}:${secret}`)}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ grant_type: "client_credentials", scope }),
   });
 
   if (!res.ok) {
     const txt = await res.text();
-    throw new Error(`token ${res.status} ${txt} [client:${id.slice(0,10)}…]`);
+    throw new Error(`token ${res.status} ${txt} [client:${id.slice(0, 12)}…]`);
   }
 
-  const json = await res.json() as { access_token: string; expires_in: number };
-  tokenMemo = { accessToken: json.access_token, expAt: Date.now() + json.expires_in*1000 };
+  const json = (await res.json()) as { access_token: string; expires_in: number };
+  tokenMemo = { accessToken: json.access_token, expAt: Date.now() + json.expires_in * 1000 };
   return tokenMemo.accessToken;
 }
 
+/** Browse: active listings (price + shipping + affiliate URL if headers provided). */
 export async function searchActive(opts: { q: string; limit?: number; categoryId?: string }) {
   const token = await getAppToken();
   const marketplace = process.env.EBAY_MARKETPLACE || "EBAY_US";
@@ -70,6 +80,7 @@ export async function searchActive(opts: { q: string; limit?: number; categoryId
   url.searchParams.set("fieldgroups", "FULL");
   if (categoryId) url.searchParams.set("category_ids", categoryId);
 
+  // Affiliate context (enables itemAffiliateWebUrl)
   const ctx: string[] = [];
   const camp = process.env.EBAY_AFFILIATE_CAMPAIGN_ID;
   const ref  = process.env.EBAY_AFFILIATE_REFERENCE_ID;
@@ -85,12 +96,15 @@ export async function searchActive(opts: { q: string; limit?: number; categoryId
     },
     cache: "no-store",
   });
+
   if (!r.ok) throw new Error(`browse ${r.status} ${await r.text()}`);
 
-  const data = await r.json() as any;
+  const data = (await r.json()) as any;
   const items: ActiveItem[] = (data.itemSummaries ?? []).map((it: any) => ({
     price: it?.price?.value ? Number(it.price.value) : null,
-    shipping: it?.shippingOptions?.[0]?.shippingCost?.value ? Number(it.shippingOptions[0].shippingCost.value) : 0,
+    shipping: it?.shippingOptions?.[0]?.shippingCost?.value
+      ? Number(it.shippingOptions[0].shippingCost.value)
+      : 0,
     date: null,
     url: it?.itemAffiliateWebUrl || it?.itemWebUrl || null,
     title: it?.title ?? null,
@@ -98,6 +112,6 @@ export async function searchActive(opts: { q: string; limit?: number; categoryId
     legacyItemId: it?.legacyItemId ?? null,
   }));
 
-  const totals = items.map(i => (i.price ?? 0) + (i.shipping ?? 0)).filter(v=>v>0);
+  const totals = items.map(i => (i.price ?? 0) + (i.shipping ?? 0)).filter(v => v > 0);
   return { history: items, stats: { median: median(totals) } };
 }
