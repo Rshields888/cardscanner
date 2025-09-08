@@ -15,6 +15,7 @@ const IdentitySchema = z.object({
   company: z.string().nullable().optional(),
   is_rookie: z.boolean().nullable().optional(),
   parallel: z.string().nullable().optional(),
+  color: z.string().nullable().optional(), // NEW: Color/variant color
   card_type: z.string().nullable().optional(),
   grade: z.string().nullable().optional(),
   canonical_name: z.string().nullable().optional(),
@@ -136,6 +137,7 @@ function validateAndCoerceIdentity(rawResponse: any): Identity {
       company: null,
       is_rookie: null,
       parallel: null,
+      color: null,
       card_type: null,
       grade: "Raw",
       canonical_name: null,
@@ -216,15 +218,17 @@ export async function POST(req: Request) {
   "company": string or null,
   "is_rookie": boolean or null,
   "parallel": string or null,
+  "color": string or null,
   "card_type": string or null,
   "grade": string or null,
   "canonical_name": string or null,
   "alt_queries": []
 }
 
-CRITICAL: Check for rookie indicators (RC, Rookie, etc.). Identify parallel/variant (Prizm, Chrome, Refractor, etc.). 
+CRITICAL: Check for rookie indicators (RC, Rookie, etc.). Identify parallel/variant (Prizm, Chrome, Refractor, etc.) AND their color (Green, Silver, Gold, etc.). 
 Look for grading (PSA, BGS, SGC labels). Check for autographs (Auto, Signature, etc.) and patches (RPA, Patch, Jersey, etc.).
 Set grade="Raw" if ungraded. Set card_type to "Auto" if autographed, "RPA" if patch card, "Base" if neither.
+For color: Extract the specific color/variant color (e.g., "Green", "Silver", "Gold", "Blue", "Purple", "Red", "Orange", "Black", "White").
 Return JSON only.`;
 
     // Make the OpenAI Vision API call with ultra-speed optimizations
