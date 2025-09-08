@@ -10,11 +10,22 @@ export type ActiveItem = {
 
 let tokenMemo: { accessToken: string; expAt: number } | null = null;
 
-function getClientId() {
-  return (process.env.EBAY_CLIENT_ID || process.env.EBAY_APP_ID || "").trim();
+function getClientIdRaw() {
+  return (process.env.EBAY_CLIENT_ID || process.env.EBAY_APP_ID || "") as string;
 }
-function getClientSecret() {
-  return (process.env.EBAY_CLIENT_SECRET || "").trim();
+function getClientSecretRaw() {
+  return (process.env.EBAY_CLIENT_SECRET || "") as string;
+}
+
+function trimSafe(s: string) {
+  // strip BOM and trim whitespace/newlines
+  return s.replace(/^\uFEFF/, "").trim();
+}
+function hasNonAscii(s: string) {
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) > 0x7f) return true;
+  }
+  return false;
 }
 
 // Edge/Node-safe base64 for Edge runtime
@@ -36,35 +47,69 @@ function median(nums: number[]) {
   return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
 }
 
-/** Fetch & cache an Application token (Client Credentials grant). */
+// Internal helper to actually request a token using a given strategy
+async function requestToken(scope: string, strategy: "basic" | "body", id: string, secret: string) {
+  const url = "https://api.ebay.com/identity/v1/oauth2/token";
+  const headers: Record<string, string> = { "Content-Type": "application/x-www-form-urlencoded" };
+  const body = new URLSearchParams({ grant_type: "client_credentials", scope });
+
+  if (strategy === "basic") {
+    headers["Authorization"] = `Basic ${b64(`${id}:${secret}`)}`;
+  } else {
+    // Fallback: send client_id/client_secret in the body (some OAuth servers accept this)
+    body.set("client_id", id);
+    body.set("client_secret", secret);
+  }
+
+  const res = await fetch(url, { method: "POST", headers, body });
+  const text = await res.text();
+  if (!res.ok) {
+    let err: any;
+    try { err = JSON.parse(text); } catch { err = text; }
+    return { ok: false as const, status: res.status, err, text };
+  }
+  let json: any = {};
+  try { json = JSON.parse(text); } catch {}
+  return { ok: true as const, status: res.status, json, text };
+}
+
+/** Fetch & cache an Application token (Client Credentials) with robust fallbacks. */
 export async function getAppToken(): Promise<string> {
   const now = Date.now();
   if (tokenMemo && now < tokenMemo.expAt - 60_000) return tokenMemo.accessToken;
 
-  const id = getClientId();
-  const secret = getClientSecret();
+  const idRaw = getClientIdRaw();
+  const secretRaw = getClientSecretRaw();
+  const id = trimSafe(idRaw);
+  const secret = trimSafe(secretRaw);
   if (!id || !secret) throw new Error("Missing EBAY_CLIENT_ID/EBAY_APP_ID or EBAY_CLIENT_SECRET");
 
-  // Scope specific to Browse (works for item_summary/search)
-  const scope = "https://api.ebay.com/oauth/api_scope/buy.browse.readonly";
-
-  const res = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${b64(`${id}:${secret}`)}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: new URLSearchParams({ grant_type: "client_credentials", scope }),
-  });
-
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`token ${res.status} ${txt} [client:${id.slice(0, 12)}…]`);
+  // sanity checks (helpful when debugging)
+  if (hasNonAscii(id) || hasNonAscii(secret)) {
+    throw new Error(`non_ascii_credential [idNonAscii=${hasNonAscii(id)} secretNonAscii=${hasNonAscii(secret)}]`);
   }
 
-  const json = (await res.json()) as { access_token: string; expires_in: number };
-  tokenMemo = { accessToken: json.access_token, expAt: Date.now() + json.expires_in * 1000 };
-  return tokenMemo.accessToken;
+  // 1) Preferred scope (Browse readonly), 2) base scope fallback
+  const scopes = [
+    "https://api.ebay.com/oauth/api_scope/buy.browse.readonly",
+    "https://api.ebay.com/oauth/api_scope",
+  ];
+
+  // Try: (scope A, basic) -> (scope A, body) -> (scope B, basic) -> (scope B, body)
+  let lastErr = "";
+  for (const scope of scopes) {
+    for (const strategy of ["basic", "body"] as const) {
+      const r = await requestToken(scope, strategy, id, secret);
+      if (r.ok) {
+        const { access_token, expires_in } = r.json as { access_token: string; expires_in: number };
+        tokenMemo = { accessToken: access_token, expAt: Date.now() + expires_in * 1000 };
+        return tokenMemo.accessToken;
+      }
+      lastErr = `(${strategy} ${scope.split("/").pop()}) ${r.status} ${typeof r.err === "string" ? r.err : JSON.stringify(r.err)}`;
+      // if it's invalid_scope, move on to next scope; if it's invalid_client, try next strategy then scope
+    }
+  }
+  throw new Error(`token_failed ${lastErr} [client:${id.slice(0, 12)}… len:${secret.length}]`);
 }
 
 /** Browse: active listings (price + shipping + affiliate URL if headers provided). */
@@ -96,15 +141,12 @@ export async function searchActive(opts: { q: string; limit?: number; categoryId
     },
     cache: "no-store",
   });
-
   if (!r.ok) throw new Error(`browse ${r.status} ${await r.text()}`);
 
-  const data = (await r.json()) as any;
+  const data = await r.json() as any;
   const items: ActiveItem[] = (data.itemSummaries ?? []).map((it: any) => ({
     price: it?.price?.value ? Number(it.price.value) : null,
-    shipping: it?.shippingOptions?.[0]?.shippingCost?.value
-      ? Number(it.shippingOptions[0].shippingCost.value)
-      : 0,
+    shipping: it?.shippingOptions?.[0]?.shippingCost?.value ? Number(it.shippingOptions[0].shippingCost.value) : 0,
     date: null,
     url: it?.itemAffiliateWebUrl || it?.itemWebUrl || null,
     title: it?.title ?? null,
