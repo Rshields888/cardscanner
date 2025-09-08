@@ -15,16 +15,18 @@ function getClientId() {
   return process.env.EBAY_CLIENT_ID || process.env.EBAY_APP_ID || "";
 }
 
-function b64(input: string) {
-  // Edge/runtime-safe base64
+function base64(input: string) {
+  // works in Edge or Node
+  if (typeof Buffer !== "undefined") return Buffer.from(input).toString("base64");
+  // @ts-ignore
   return btoa(unescape(encodeURIComponent(input)));
 }
 
 function median(nums: number[]) {
   if (!nums.length) return null as number | null;
   const a = [...nums].sort((x, y) => x - y);
-  const mid = Math.floor(a.length / 2);
-  return a.length % 2 ? a[mid] : (a[mid - 1] + a[mid]) / 2;
+  const m = Math.floor(a.length / 2);
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2;
 }
 
 export async function getAppToken() {
@@ -43,7 +45,7 @@ export async function getAppToken() {
   const res = await fetch("https://api.ebay.com/identity/v1/oauth2/token", {
     method: "POST",
     headers: {
-      Authorization: `Basic ${b64(`${id}:${secret}`)}`,
+      Authorization: `Basic ${base64(`${id}:${secret}`)}`,
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body,
