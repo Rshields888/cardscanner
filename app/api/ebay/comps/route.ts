@@ -12,13 +12,14 @@ export async function POST(req: Request) {
     const identity = body?.identity ?? null;
     const limit = Number(body?.limit ?? 30);
     const categoryId = body?.categoryId || process.env.EBAY_CATEGORY_ID || "";
+    const sort = body?.sort || "bestMatch"; // Default to best match, but allow override
 
     let query: string = body?.query || (identity ? buildQuery(identity) : "");
     const alts: string[] = body?.alt_queries || (identity ? altQueries(identity) : []);
 
     console.log(`[ebay:${rid}] primary q=`, query);
 
-    let result = await searchActive({ q: query, limit, categoryId });
+    let result = await searchActive({ q: query, limit, categoryId, sort });
     let used = { which: "primary", q: query, count: result.history?.length || 0, median: result.stats?.median ?? null };
 
     // try alternates if sparse
@@ -26,7 +27,7 @@ export async function POST(req: Request) {
       for (const q2 of alts) {
         if (!q2 || q2 === query) continue;
         console.log(`[ebay:${rid}] try alt q=`, q2);
-        const r2 = await searchActive({ q: q2, limit, categoryId });
+        const r2 = await searchActive({ q: q2, limit, categoryId, sort });
         if ((r2.history?.length || 0) > used.count) {
           result = r2;
           used = { which: "alt", q: q2, count: r2.history?.length || 0, median: r2.stats?.median ?? null };
@@ -37,7 +38,7 @@ export async function POST(req: Request) {
 
     // final fallback: drop category filter entirely
     if (used.count < 3) {
-      const r3 = await searchActive({ q: used.q, limit, categoryId: "" });
+      const r3 = await searchActive({ q: used.q, limit, categoryId: "", sort });
       if ((r3.history?.length || 0) > used.count) {
         result = r3;
         used = { which: used.which + "+nocat", q: used.q, count: r3.history?.length || 0, median: r3.stats?.median ?? null };

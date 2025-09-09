@@ -113,7 +113,7 @@ export async function getAppToken(): Promise<string> {
 }
 
 /** Browse: active listings (price + shipping + affiliate URL if headers provided). */
-export async function searchActive(opts: { q: string; limit?: number; categoryId?: string }) {
+export async function searchActive(opts: { q: string; limit?: number; categoryId?: string; sort?: string }) {
   const token = await getAppToken();
   const marketplace = process.env.EBAY_MARKETPLACE || "EBAY_US";
   const limit = String(opts.limit ?? 30);
@@ -124,6 +124,7 @@ export async function searchActive(opts: { q: string; limit?: number; categoryId
   url.searchParams.set("limit", limit);
   url.searchParams.set("fieldgroups", "FULL");
   if (categoryId) url.searchParams.set("category_ids", categoryId);
+  if (opts.sort) url.searchParams.set("sort", opts.sort);
 
   // Affiliate context (enables itemAffiliateWebUrl)
   const ctx: string[] = [];
